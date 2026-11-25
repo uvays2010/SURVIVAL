@@ -1,0 +1,6 @@
+{
+  "name": "SURVIVAL: THE LOST WORLD",
+  "description": "An expansive, ultra-realistic 3D open-world survival exploration experience with dynamic biomes, volumetric atmosphere, living wildlife, real-time water, and a 24-hour weather cycle.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
