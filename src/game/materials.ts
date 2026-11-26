@@ -293,7 +293,7 @@ export function createWaterMaterial(env: SharedEnvUniforms): THREE.ShaderMateria
         float h = hash21(cell);
         float phase = fract(t * 1.45 + h * 6.28);
         float d = length(local);
-        float ring = smoothstep(0.07, 0.0, abs(d - phase * 0.48)) * (1.0 - phase);
+        float ring = (1.0 - smoothstep(0.0, 0.07, abs(d - phase * 0.48))) * (1.0 - phase);
         return ring;
       }
 
@@ -317,7 +317,7 @@ export function createWaterMaterial(env: SharedEnvUniforms): THREE.ShaderMateria
         vec3 V = normalize(cameraPosition - vWorldPos);
 
         // Fresnel
-        float fresnel = clamp(0.03 + 0.97 * pow(1.0 - max(dot(N, V), 0.0), 4.2), 0.0, 1.0);
+        float fresnel = clamp(0.03 + 0.97 * pow(max(1.0 - max(dot(N, V), 0.0), 1e-4), 4.2), 0.0, 1.0);
 
         // Depth-based water absorption color (turquoise shallows -> deep emerald/navy)
         float depthNorm = clamp(vDepth / 4.2, 0.0, 1.0);
@@ -328,8 +328,8 @@ export function createWaterMaterial(env: SharedEnvUniforms): THREE.ShaderMateria
         // Dynamic sky/mountain reflection + Real-time CubeCamera environment reflections
         vec3 R = reflect(-V, N);
         float reflElev = clamp(R.y, 0.0, 1.0);
-        vec3 skyRefl = mix(uSkyHorizonColor, uSkyTopColor, pow(reflElev, 0.6));
-        float treeBand = smoothstep(0.24, 0.02, reflElev) * 0.38;
+        vec3 skyRefl = mix(uSkyHorizonColor, uSkyTopColor, pow(max(reflElev, 1e-4), 0.6));
+        float treeBand = (1.0 - smoothstep(0.02, 0.24, reflElev)) * 0.38;
         skyRefl = mix(skyRefl, vec3(0.07, 0.12, 0.09) * (1.0 - uNightFactor * 0.75), treeBand);
 
         if (uEnvMapMix > 0.01) {
@@ -341,22 +341,26 @@ export function createWaterMaterial(env: SharedEnvUniforms): THREE.ShaderMateria
         // Sun & Moon specular glints + rich golden-hour sunset sun path
         vec3 L = normalize(uSunDir);
         vec3 H = normalize(L + V);
-        float sunsetBoost = exp(-pow((L.y - 0.06) / 0.16, 2.0));
-        float sunSpec = pow(max(dot(N, H), 0.0), 210.0) * (1.0 - uNightFactor) * (2.6 + sunsetBoost * 1.4);
-        float sunSheen = pow(max(dot(N, H), 0.0), 18.0) * (1.0 - uNightFactor) * (0.26 + sunsetBoost * 0.42);
+        float sunsetArg = (L.y - 0.06) / 0.16;
+        float sunsetBoost = exp(-(sunsetArg * sunsetArg));
+        float ndh = max(dot(N, H), 0.0);
+        float sunSpec = (ndh > 1e-3 ? pow(ndh, 210.0) : 0.0) * (1.0 - uNightFactor) * (2.6 + sunsetBoost * 1.4);
+        float sunSheen = (ndh > 1e-3 ? pow(ndh, 18.0) : 0.0) * (1.0 - uNightFactor) * (0.26 + sunsetBoost * 0.42);
         // Stretched shimmer path across ripples toward low setting sun
         vec3 NFlat = normalize(vec3(N.x * 0.45, 1.0, N.z * 1.4));
         vec3 HPath = normalize(L + V);
-        float sunPath = pow(max(dot(NFlat, HPath), 0.0), 38.0) * (1.0 - uNightFactor) * sunsetBoost * 0.58;
+        float nfhp = max(dot(NFlat, HPath), 0.0);
+        float sunPath = (nfhp > 1e-3 ? pow(nfhp, 38.0) : 0.0) * (1.0 - uNightFactor) * sunsetBoost * 0.58;
 
         vec3 ML = normalize(uMoonDir);
         vec3 MH = normalize(ML + V);
-        float moonSpec = pow(max(dot(N, MH), 0.0), 140.0) * uNightFactor * 0.75;
+        float ndmh = max(dot(N, MH), 0.0);
+        float moonSpec = (ndmh > 1e-3 ? pow(ndmh, 140.0) : 0.0) * uNightFactor * 0.75;
 
         // Shoreline & waterfall plunge foam
         float plungeDist = length(vWorldPos.xz - vec2(20.0, -124.0));
-        float plungeFoam = smoothstep(18.0, 4.0, plungeDist) * smoothstep(0.38, 0.72, h0);
-        float shoreFoam = smoothstep(0.55, 0.02, vDepth) * smoothstep(0.45, 0.75, h0);
+        float plungeFoam = (1.0 - smoothstep(4.0, 18.0, plungeDist)) * smoothstep(0.38, 0.72, h0);
+        float shoreFoam = (1.0 - smoothstep(0.02, 0.55, vDepth)) * smoothstep(0.45, 0.75, h0);
         float foam = clamp(shoreFoam * 0.85 + plungeFoam * 1.1 + rainRip * 0.35, 0.0, 1.0);
 
         vec3 dayLightFactor = mix(vec3(1.0), vec3(0.22, 0.28, 0.42), uNightFactor);
@@ -367,7 +371,8 @@ export function createWaterMaterial(env: SharedEnvUniforms): THREE.ShaderMateria
 
         // Exponential distance fog matching scene.fog
         float camDist = length(cameraPosition - vWorldPos);
-        float fogFactor = 1.0 - exp(-pow(camDist * uFogDensity, 2.0));
+        float fogDist = camDist * uFogDensity;
+        float fogFactor = 1.0 - exp(-(fogDist * fogDist));
         col = mix(col, uFogColor, clamp(fogFactor, 0.0, 1.0));
 
         float alpha = clamp(mix(0.42, 0.94, smoothstep(0.05, 1.6, vDepth)) + fresnel * 0.25 + foam * 0.35, 0.25, 0.97);
@@ -439,7 +444,8 @@ export function createWaterfallMaterial(env: SharedEnvUniforms): THREE.ShaderMat
         vec3 col = baseWater * lightTint;
 
         float camDist = length(cameraPosition - vWorldPos);
-        float fogFactor = 1.0 - exp(-pow(camDist * uFogDensity, 2.0));
+        float fogDist = camDist * uFogDensity;
+        float fogFactor = 1.0 - exp(-(fogDist * fogDist));
         col = mix(col, uFogColor, clamp(fogFactor, 0.0, 1.0));
         gl_FragColor = vec4(col, alpha);
       }
@@ -510,24 +516,27 @@ export function createSkyDomeMaterial(env: SharedEnvUniforms): THREE.ShaderMater
         float y = clamp(dir.y, 0.0, 1.0);
 
         // Rayleigh/Mie sky gradient + rich rose-amber sunset horizon band
-        vec3 sky = mix(uSkyHorizonColor, uSkyTopColor, pow(y, 0.48));
+        vec3 sky = mix(uSkyHorizonColor, uSkyTopColor, pow(max(y, 1e-4), 0.48));
 
         // Sun disc + Mie scattering corona + directional sunset blush
         vec3 sDir = normalize(uSunDir);
         float sunDot = max(dot(dir, sDir), 0.0);
-        float sunsetWeight = exp(-pow((sDir.y - 0.05) / 0.17, 2.0));
+        float sunsetArg = (sDir.y - 0.05) / 0.17;
+        float sunsetWeight = exp(-(sunsetArg * sunsetArg));
         float sunDisc = smoothstep(0.9990, 0.99965, sunDot);
-        float sunGlow = pow(sunDot, 8.0) * (0.38 + sunsetWeight * 0.35) + pow(sunDot, 72.0) * 0.82;
+        float sunGlow = (sunDot > 1e-4 ? pow(sunDot, 8.0) : 0.0) * (0.38 + sunsetWeight * 0.35)
+                      + (sunDot > 1e-4 ? pow(sunDot, 72.0) : 0.0) * 0.82;
         float sunVisible = smoothstep(-0.10, 0.06, sDir.y);
 
         // Warm peach-magenta sunset band hugging the horizon toward the sun
-        float horizBand = exp(-y * 5.2) * pow(sunDot, 2.0) * sunsetWeight * sunVisible;
+        float horizBand = exp(-y * 5.2) * (sunDot * sunDot) * sunsetWeight * sunVisible;
         sky += vec3(1.0, 0.44, 0.24) * horizBand * 0.58;
         sky += uSunColor * (sunGlow + sunDisc * 3.4) * sunVisible;
 
         // Subtle radial crepuscular sun shafts in the sky dome
-        if (sunVisible > 0.02 && dir.y > -0.02) {
-          float az = atan(dir.x - sDir.x, dir.z - sDir.z);
+        if (sunVisible > 0.02 && dir.y > -0.02 && sunDot > 1e-4) {
+          vec2 azDelta = dir.xz - sDir.xz;
+          float az = length(azDelta) > 1e-4 ? atan(azDelta.x, azDelta.y) : 0.0;
           float rayNoise = noise(vec2(az * 7.5 + uTime * 0.03, y * 2.5));
           float rays = pow(sunDot, 5.0) * smoothstep(0.42, 0.88, rayNoise) * (0.14 + sunsetWeight * 0.22);
           sky += uSunColor * rays * sunVisible * (1.0 - uNightFactor);
@@ -541,7 +550,7 @@ export function createSkyDomeMaterial(env: SharedEnvUniforms): THREE.ShaderMater
           float rnd = hash(cell);
           if (rnd > 0.972) {
             float twinkle = 0.65 + 0.35 * sin(uTime * 2.5 + rnd * 120.0);
-            float star = smoothstep(0.16, 0.01, length(local)) * twinkle;
+            float star = (1.0 - smoothstep(0.01, 0.16, length(local))) * twinkle;
             sky += vec3(0.85, 0.91, 1.0) * star * uNightFactor * smoothstep(0.02, 0.25, dir.y);
           }
         }
@@ -551,7 +560,7 @@ export function createSkyDomeMaterial(env: SharedEnvUniforms): THREE.ShaderMater
         float moonDot = max(dot(dir, mDir), 0.0);
         float moonVis = smoothstep(-0.04, 0.1, mDir.y) * uNightFactor;
         float moonDisc = smoothstep(0.9987, 0.9992, moonDot);
-        float moonHalo = pow(moonDot, 28.0) * 0.28;
+        float moonHalo = (moonDot > 1e-4 ? pow(moonDot, 28.0) : 0.0) * 0.28;
         sky += vec3(0.76, 0.86, 1.0) * (moonDisc * 1.6 + moonHalo) * moonVis;
 
         // Volumetric-style drifting cloud plane projection with fiery sunset underlighting
@@ -563,8 +572,8 @@ export function createSkyDomeMaterial(env: SharedEnvUniforms): THREE.ShaderMater
           float threshold = mix(0.68, 0.36, uCloudDensity);
           float cloudAlpha = smoothstep(threshold, threshold + 0.26, cloudVal) * smoothstep(0.015, 0.16, dir.y);
 
-          float rim = pow(sunDot, 4.5) * sunVisible;
-          vec3 sunsetUnderlit = mix(vec3(0.98, 0.66, 0.42), vec3(1.0, 0.48, 0.34), pow(sunDot, 2.0));
+          float rim = (sunDot > 1e-4 ? pow(sunDot, 4.5) : 0.0) * sunVisible;
+          vec3 sunsetUnderlit = mix(vec3(0.98, 0.66, 0.42), vec3(1.0, 0.48, 0.34), sunDot * sunDot);
           vec3 cloudLit = mix(vec3(0.96, 0.97, 0.99), uSunColor * 1.18, 0.42 + rim * 0.48);
           cloudLit = mix(cloudLit, sunsetUnderlit * 1.15, sunsetWeight * 0.75 * sunVisible);
           vec3 cloudDark = mix(uSkyTopColor * 0.52 + vec3(0.18, 0.14, 0.20), vec3(0.08, 0.11, 0.18), uNightFactor);
@@ -576,10 +585,10 @@ export function createSkyDomeMaterial(env: SharedEnvUniforms): THREE.ShaderMater
         }
 
         // Smooth horizon mist blend
-        float horizonBlend = smoothstep(0.085, -0.025, dir.y);
+        float horizonBlend = 1.0 - smoothstep(-0.025, 0.085, dir.y);
         sky = mix(sky, uSkyHorizonColor, horizonBlend);
 
-        gl_FragColor = vec4(sky, 1.0);
+        gl_FragColor = vec4(max(sky, vec3(0.0)), 1.0);
       }
     `,
   });

@@ -22,6 +22,7 @@ import {
 } from './materials';
 
 import { CrateAnchor, TotemAnchor } from './combat';
+import { getWorldMapDef, WorldMapDef } from './types';
 
 export interface CylinderCollider {
   x: number;
@@ -64,6 +65,7 @@ export interface WorldHandles {
   lanternLights: THREE.PointLight[];
   updateGrass: (px: number, pz: number, maxRadius: number, maxCount: number) => void;
   rebuildTerrainAndWater: (terrainSegs: number, waterSegs: number) => void;
+  dispose: () => void;
 }
 
 function buildTerrainGeometry(segments: number): THREE.BufferGeometry {
@@ -255,7 +257,8 @@ export function buildOpenWorld(
   textures: ProceduralTextureSet,
   env: SharedEnvUniforms,
   initialTerrainSegs: number,
-  initialWaterSegs: number
+  initialWaterSegs: number,
+  mapDef: WorldMapDef = getWorldMapDef('lost_valley')
 ): WorldHandles {
   const root = new THREE.Group();
   const colliders: CylinderCollider[] = [];
@@ -272,45 +275,47 @@ export function buildOpenWorld(
   terrainMesh.castShadow = false;
   root.add(terrainMesh);
 
-  // 2. WATER SURFACE (River + Lake + Plunge Pool)
+  // 2. WATER SURFACE (River + Lake + Plunge Pool / Straits)
   const waterMat = createWaterMaterial(env);
   const waterMesh = new THREE.Mesh(buildWaterGeometry(initialWaterSegs), waterMat);
   waterMesh.position.y = WATER_LEVEL;
   waterMesh.renderOrder = 2;
   root.add(waterMesh);
 
-  // Upper Mountain Stream feeding the Waterfall
-  const upperStreamGeo = new THREE.PlaneGeometry(16, 110, 12, 32);
-  upperStreamGeo.rotateX(-Math.PI / 2);
-  const uPos = upperStreamGeo.attributes.position as THREE.BufferAttribute;
-  const uDepth = new Float32Array(uPos.count);
-  const uFlow = new Float32Array(uPos.count);
-  for (let i = 0; i < uPos.count; i++) {
-    const wx = 20 + uPos.getX(i);
-    const wz = -198 + uPos.getZ(i);
-    uPos.setX(i, wx);
-    uPos.setZ(i, wz);
-    uPos.setY(i, groundHeightAt(wx, wz) + 0.35);
-    uDepth[i] = 1.1;
-    uFlow[i] = 1.15;
-  }
-  upperStreamGeo.setAttribute('aWaterDepth', new THREE.BufferAttribute(uDepth, 1));
-  upperStreamGeo.setAttribute('aFlowSpeed', new THREE.BufferAttribute(uFlow, 1));
-  const upperStreamMesh = new THREE.Mesh(upperStreamGeo, waterMat);
-  root.add(upperStreamMesh);
+  if (mapDef.hasClassicStructures) {
+    // Upper Mountain Stream feeding the Waterfall
+    const upperStreamGeo = new THREE.PlaneGeometry(16, 110, 12, 32);
+    upperStreamGeo.rotateX(-Math.PI / 2);
+    const uPos = upperStreamGeo.attributes.position as THREE.BufferAttribute;
+    const uDepth = new Float32Array(uPos.count);
+    const uFlow = new Float32Array(uPos.count);
+    for (let i = 0; i < uPos.count; i++) {
+      const wx = 20 + uPos.getX(i);
+      const wz = -198 + uPos.getZ(i);
+      uPos.setX(i, wx);
+      uPos.setZ(i, wz);
+      uPos.setY(i, groundHeightAt(wx, wz) + 0.35);
+      uDepth[i] = 1.1;
+      uFlow[i] = 1.15;
+    }
+    upperStreamGeo.setAttribute('aWaterDepth', new THREE.BufferAttribute(uDepth, 1));
+    upperStreamGeo.setAttribute('aFlowSpeed', new THREE.BufferAttribute(uFlow, 1));
+    const upperStreamMesh = new THREE.Mesh(upperStreamGeo, waterMat);
+    root.add(upperStreamMesh);
 
-  // 3. WATERFALL CASCADE (at x=20, z=-138)
-  const waterfallMat = createWaterfallMaterial(env);
-  const wfGroup = new THREE.Group();
-  wfGroup.position.set(20, 11.5, -138);
-  const wfMain = new THREE.Mesh(new THREE.PlaneGeometry(13, 27, 8, 16), waterfallMat);
-  wfMain.rotation.x = -0.14;
-  wfGroup.add(wfMain);
-  const wfVeil = new THREE.Mesh(new THREE.PlaneGeometry(10.5, 25, 6, 12), waterfallMat);
-  wfVeil.position.set(0.4, -0.4, 0.9);
-  wfVeil.rotation.x = -0.18;
-  wfGroup.add(wfVeil);
-  root.add(wfGroup);
+    // 3. WATERFALL CASCADE (at x=20, z=-138)
+    const waterfallMat = createWaterfallMaterial(env);
+    const wfGroup = new THREE.Group();
+    wfGroup.position.set(20, 11.5, -138);
+    const wfMain = new THREE.Mesh(new THREE.PlaneGeometry(13, 27, 8, 16), waterfallMat);
+    wfMain.rotation.x = -0.14;
+    wfGroup.add(wfMain);
+    const wfVeil = new THREE.Mesh(new THREE.PlaneGeometry(10.5, 25, 6, 12), waterfallMat);
+    wfVeil.position.set(0.4, -0.4, 0.9);
+    wfVeil.rotation.x = -0.18;
+    wfGroup.add(wfVeil);
+    root.add(wfGroup);
+  }
 
   // 4. FOREST TREES (Instanced Multi-Part Trunks + Wind-Animated Canopies)
   const rand = seededRandom(918273);
@@ -343,11 +348,14 @@ export function buildOpenWorld(
     const x = (rand() - 0.5) * 760;
     const z = (rand() - 0.5) * 760;
 
-    // Exclude spawn camp clearing, abandoned village core, cavern mouth, bridge & water
-    if (Math.hypot(x + 16, z - 76) < 15) continue;
-    if (Math.hypot(x - 106, z - 18) < 28) continue;
-    if (Math.hypot(x + 134, z + 118) < 26) continue;
-    if (Math.hypot(x - 42, z - 12) < 16) continue;
+    // Exclude spawn camp clearing, landmarks, village core, cavern mouth, bridge & water
+    if (Math.hypot(x - mapDef.spawn.x, z - mapDef.spawn.z) < 15) continue;
+    if (mapDef.landmarks.some((lm) => Math.hypot(x - lm.x, z - lm.z) < 8)) continue;
+    if (mapDef.hasClassicStructures) {
+      if (Math.hypot(x - 106, z - 18) < 28) continue;
+      if (Math.hypot(x + 134, z + 118) < 26) continue;
+      if (Math.hypot(x - 42, z - 12) < 16) continue;
+    }
 
     const { dist } = waterDistanceInfo(x, z);
     if (dist < 4.5) continue;
@@ -493,7 +501,7 @@ export function buildOpenWorld(
     const lz = (rand() - 0.5) * 360;
     const { dist } = waterDistanceInfo(lx, lz);
     const h = groundHeightAt(lx, lz);
-    if (dist < 4 || h < 1 || h > 16 || Math.hypot(lx + 16, lz - 76) < 10) continue;
+    if (dist < 4 || h < 1 || h > 16 || Math.hypot(lx - mapDef.spawn.x, lz - mapDef.spawn.z) < 10) continue;
     dummy.position.set(lx, h + 0.16, lz);
     dummy.rotation.set((rand() - 0.5) * 0.12, rand() * Math.PI * 2, (rand() - 0.5) * 0.12);
     dummy.scale.setScalar(0.8 + rand() * 0.6);
@@ -519,8 +527,8 @@ export function buildOpenWorld(
   for (let i = 0; i < 650 && rockIdx < 420; i++) {
     const rx = (rand() - 0.5) * 620;
     const rz = (rand() - 0.5) * 620;
-    if (Math.hypot(rx + 16, rz - 76) < 12) continue;
-    if (Math.hypot(rx - 42, rz - 12) < 14) continue;
+    if (Math.hypot(rx - mapDef.spawn.x, rz - mapDef.spawn.z) < 12) continue;
+    if (mapDef.hasClassicStructures && Math.hypot(rx - 42, rz - 12) < 14) continue;
     const h = groundHeightAt(rx, rz);
     const w = getBiomeWeights(rx, rz, h);
     const { dist } = waterDistanceInfo(rx, rz);
@@ -547,42 +555,42 @@ export function buildOpenWorld(
   rockInstances.computeBoundingSphere();
   root.add(rockInstances);
 
-  // 5B. MONUMENTAL GRANITE MOUNTAIN SPIRES & CASCADE GORGE CLIFF BUTTRESSES
-  const spireGeo = createDeformedRockGeometry(5.8, 2, 11.4);
-  const spireMat = new THREE.MeshStandardMaterial({
-    map: textures.rockMap,
-    normalMap: textures.rockNormal,
-    color: 0x858a90,
-    roughness: 0.88,
-    metalness: 0.05,
-  });
-  const spirePlacements: { x: number; z: number; sx: number; sy: number; sz: number; ry: number }[] = [
-    // Flanking Cascade Falls gorge (x=20, z=-138)
-    { x: 4, z: -136, sx: 1.8, sy: 3.4, sz: 1.7, ry: 0.4 },
-    { x: 37, z: -135, sx: 1.9, sy: 3.6, sz: 1.6, ry: -0.7 },
-    { x: -12, z: -148, sx: 2.2, sy: 4.1, sz: 2.0, ry: 1.1 },
-    { x: 52, z: -152, sx: 2.4, sy: 4.3, sz: 2.1, ry: 2.2 },
-    // Northern Alpine Skyline Spires
-    { x: -86, z: -182, sx: 3.2, sy: 5.5, sz: 2.8, ry: 0.8 },
-    { x: -42, z: -195, sx: 3.5, sy: 6.2, sz: 3.0, ry: 1.7 },
-    { x: 18, z: -215, sx: 3.8, sy: 6.8, sz: 3.1, ry: 0.2 },
-    { x: 74, z: -192, sx: 3.4, sy: 5.8, sz: 2.9, ry: 2.6 },
-    { x: 126, z: -178, sx: 3.1, sy: 5.1, sz: 2.6, ry: 1.1 },
-    { x: -142, z: -165, sx: 2.8, sy: 4.8, sz: 2.5, ry: 0.5 },
-  ];
-  const spiresMesh = new THREE.InstancedMesh(spireGeo, spireMat, spirePlacements.length);
-  spiresMesh.castShadow = true;
-  spiresMesh.receiveShadow = true;
-  spirePlacements.forEach((sp, i) => {
-    const syBase = groundHeightAt(sp.x, sp.z);
-    dummy.position.set(sp.x, syBase + sp.sy * 1.4, sp.z);
-    dummy.rotation.set(0.06, sp.ry, -0.05);
-    dummy.scale.set(sp.sx, sp.sy, sp.sz);
-    dummy.updateMatrix();
-    spiresMesh.setMatrixAt(i, dummy.matrix);
-  });
-  spiresMesh.computeBoundingSphere();
-  root.add(spiresMesh);
+  // 5B. MONUMENTAL GRANITE MOUNTAIN SPIRES & CASCADE GORGE CLIFF BUTTRESSES (Classic Valley)
+  if (mapDef.hasClassicStructures) {
+    const spireGeo = createDeformedRockGeometry(5.8, 2, 11.4);
+    const spireMat = new THREE.MeshStandardMaterial({
+      map: textures.rockMap,
+      normalMap: textures.rockNormal,
+      color: 0x858a90,
+      roughness: 0.88,
+      metalness: 0.05,
+    });
+    const spirePlacements: { x: number; z: number; sx: number; sy: number; sz: number; ry: number }[] = [
+      { x: 4, z: -136, sx: 1.8, sy: 3.4, sz: 1.7, ry: 0.4 },
+      { x: 37, z: -135, sx: 1.9, sy: 3.6, sz: 1.6, ry: -0.7 },
+      { x: -12, z: -148, sx: 2.2, sy: 4.1, sz: 2.0, ry: 1.1 },
+      { x: 52, z: -152, sx: 2.4, sy: 4.3, sz: 2.1, ry: 2.2 },
+      { x: -86, z: -182, sx: 3.2, sy: 5.5, sz: 2.8, ry: 0.8 },
+      { x: -42, z: -195, sx: 3.5, sy: 6.2, sz: 3.0, ry: 1.7 },
+      { x: 18, z: -215, sx: 3.8, sy: 6.8, sz: 3.1, ry: 0.2 },
+      { x: 74, z: -192, sx: 3.4, sy: 5.8, sz: 2.9, ry: 2.6 },
+      { x: 126, z: -178, sx: 3.1, sy: 5.1, sz: 2.6, ry: 1.1 },
+      { x: -142, z: -165, sx: 2.8, sy: 4.8, sz: 2.5, ry: 0.5 },
+    ];
+    const spiresMesh = new THREE.InstancedMesh(spireGeo, spireMat, spirePlacements.length);
+    spiresMesh.castShadow = true;
+    spiresMesh.receiveShadow = true;
+    spirePlacements.forEach((sp, i) => {
+      const syBase = groundHeightAt(sp.x, sp.z);
+      dummy.position.set(sp.x, syBase + sp.sy * 1.4, sp.z);
+      dummy.rotation.set(0.06, sp.ry, -0.05);
+      dummy.scale.set(sp.sx, sp.sy, sp.sz);
+      dummy.updateMatrix();
+      spiresMesh.setMatrixAt(i, dummy.matrix);
+    });
+    spiresMesh.computeBoundingSphere();
+    root.add(spiresMesh);
+  }
 
   // 5C. FOREST FERNS & SHORELINE BUSH CLUSTERS (sharing wind-animated canopyMat)
   const fernCards: THREE.BufferGeometry[] = [];
@@ -606,7 +614,7 @@ export function buildOpenWorld(
     const h = groundHeightAt(fx, fz);
     const n = groundNormalAt(fx, fz);
     if (dist < 1.2 || h < 0.45 || h > 16 || n.ny < 0.8) continue;
-    if (Math.hypot(fx + 16, fz - 76) < 4.5) continue;
+    if (Math.hypot(fx - mapDef.spawn.x, fz - mapDef.spawn.z) < 4.5) continue;
     const fs = 0.65 + rand() * 0.75;
     dummy.position.set(fx, h - 0.05, fz);
     dummy.rotation.set(0, rand() * Math.PI * 2, 0);
@@ -621,18 +629,24 @@ export function buildOpenWorld(
   fernMesh.computeBoundingSphere();
   treeCanopyGroup.add(fernMesh);
 
-  // 6. ECHO CAVERN (Exploreable Deep Rock Vault + Stalactites + Mineral Pool)
-  const caveGroup = buildEchoCavern(textures, env, colliders);
-  root.add(caveGroup);
+  if (mapDef.hasClassicStructures) {
+    // 6. ECHO CAVERN (Exploreable Deep Rock Vault + Stalactites + Mineral Pool)
+    const caveGroup = buildEchoCavern(textures, env, colliders);
+    root.add(caveGroup);
 
-  // 7. OLD TIMBER RIVER BRIDGE (at x=42, z=12 spanning river)
-  buildRiverBridge(root, textures, bridges, boxColliders);
+    // 7. OLD TIMBER RIVER BRIDGE (at x=18, z=12 spanning river)
+    buildRiverBridge(root, textures, bridges, boxColliders);
 
-  // 8. ABANDONED VILLAGE (Detailed Cabins, Porches, Lanterns, Dock, Rusted Expedition 4x4)
-  buildAbandonedVillage(root, textures, boxColliders, colliders, lanternLights);
+    // 8. ABANDONED VILLAGE (Detailed Cabins, Porches, Lanterns, Dock, Rusted Expedition 4x4)
+    buildAbandonedVillage(root, textures, boxColliders, colliders, lanternLights);
+  }
 
-  // 9. FOREST SURVIVAL CAMP & INTERACTIVE CAMPFIRE (at x=-16, z=76)
-  const campfirePos = new THREE.Vector3(-16, groundHeightAt(-16, 76), 76);
+  // 9. SURVIVAL CAMP & INTERACTIVE CAMPFIRE (at map spawn clearing)
+  const campfirePos = new THREE.Vector3(
+    mapDef.spawn.x,
+    groundHeightAt(mapDef.spawn.x, mapDef.spawn.z),
+    mapDef.spawn.z
+  );
   buildSurvivalCamp(root, textures, campfirePos, colliders, lanternLights);
 
   // Combat & Interactive Anchors (Crates + Training Totems at Camp & Village)
@@ -640,13 +654,17 @@ export function buildOpenWorld(
     { x: campfirePos.x + 3.4, z: campfirePos.z - 2.6, rotY: 0.35 },
     { x: campfirePos.x + 4.5, z: campfirePos.z - 1.9, rotY: -0.2 },
     { x: campfirePos.x + 3.9, z: campfirePos.z - 3.6, rotY: 0.85 },
-    { x: 98, z: 13, rotY: 0.4 },
-    { x: 99.3, z: 13.7, rotY: -0.3 },
-    { x: 111, z: 24, rotY: 0.7 },
+    ...(mapDef.hasClassicStructures
+      ? [
+          { x: 98, z: 13, rotY: 0.4 },
+          { x: 99.3, z: 13.7, rotY: -0.3 },
+          { x: 111, z: 24, rotY: 0.7 },
+        ]
+      : []),
   ];
   const totemAnchors: TotemAnchor[] = [
     { x: campfirePos.x + 5.8, z: campfirePos.z + 2.4 },
-    { x: 91, z: 22 },
+    ...(mapDef.hasClassicStructures ? [{ x: 91, z: 22 }] : []),
   ];
 
   // 10. DYNAMIC INSTANCED GRASS & WILDFLOWERS (Sliding Window around Player)
@@ -762,13 +780,24 @@ export function buildOpenWorld(
   };
 
   // Initial populate around camp spawn
-  updateGrass(-16, 76, 62, 12000);
+  updateGrass(campfirePos.x, campfirePos.z, 62, 12000);
 
   const rebuildTerrainAndWater = (terrainSegs: number, waterSegs: number) => {
     terrainMesh.geometry.dispose();
     terrainMesh.geometry = buildTerrainGeometry(terrainSegs);
     waterMesh.geometry.dispose();
     waterMesh.geometry = buildWaterGeometry(waterSegs);
+  };
+
+  const dispose = () => {
+    root.traverse((obj) => {
+      const m = obj as THREE.Mesh;
+      if (m.geometry) m.geometry.dispose();
+      if (m.material) {
+        if (Array.isArray(m.material)) m.material.forEach((mat) => mat.dispose());
+        else m.material.dispose();
+      }
+    });
   };
 
   return {
@@ -789,6 +818,7 @@ export function buildOpenWorld(
     lanternLights,
     updateGrass,
     rebuildTerrainAndWater,
+    dispose,
   };
 }
 

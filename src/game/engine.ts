@@ -2,13 +2,10 @@ import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-import { SSAOPass } from 'three/addons/postprocessing/SSAOPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { BokehPass } from 'three/addons/postprocessing/BokehPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
-import { FXAAShader } from 'three/addons/shaders/FXAAShader.js';
 
 import {
   QualityPreset,
@@ -16,12 +13,20 @@ import {
   WeatherMode,
   CameraMode,
   HudTelemetry,
-  LANDMARKS,
   GraphicsFlags,
   getPresetGraphicsFlags,
+  WorldMapId,
+  getWorldMapDef,
 } from './types';
-import { groundHeightAt, getDominantBiome, getCaveProximity, waterDistanceInfo, WATER_LEVEL } from './noise';
-import { createProceduralTextures } from './textures';
+import {
+  groundHeightAt,
+  getDominantBiome,
+  getCaveProximity,
+  waterDistanceInfo,
+  WATER_LEVEL,
+  setActiveWorldMap,
+} from './noise';
+import { createProceduralTextures, ProceduralTextureSet } from './textures';
 import { createSharedEnvUniforms, createSkyDomeMaterial } from './materials';
 import { buildOpenWorld } from './world';
 import { createCharacterSystem } from './character';
@@ -29,55 +34,17 @@ import { createWildlifeSystem } from './wildlife';
 import { createWeatherAndVfxSystem } from './weatherAndVfx';
 import { createCombatSystem, CombatSystem } from './combat';
 
-// Directional Camera-Velocity + Subtle Sprint/Dodge Radial Motion Blur Shader
-const MotionBlurShader = {
-  uniforms: {
-    tDiffuse: { value: null },
-    uVelocity: { value: new THREE.Vector2(0, 0) },
-    uRadial: { value: 0.0 },
-  },
-  vertexShader: `
-    varying vec2 vUv;
-    void main() {
-      vUv = uv;
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-    }
-  `,
-  fragmentShader: `
-    uniform sampler2D tDiffuse;
-    uniform vec2 uVelocity;
-    uniform float uRadial;
-    varying vec2 vUv;
-
-    void main() {
-      vec2 toCenter = vUv - 0.5;
-      float edgeMask = smoothstep(0.18, 0.72, length(toCenter));
-      vec2 blurVec = uVelocity + toCenter * (uRadial * edgeMask);
-      float mag = length(blurVec);
-      if (mag < 0.00035) {
-        gl_FragColor = texture2D(tDiffuse, vUv);
-        return;
-      }
-      vec2 stepVec = blurVec * (min(mag, 0.018) / mag) / 7.0;
-      vec4 sum = vec4(0.0);
-      for (int i = -3; i <= 3; i++) {
-        vec2 sampleUv = clamp(vUv + stepVec * float(i), vec2(0.001), vec2(0.999));
-        sum += texture2D(tDiffuse, sampleUv);
-      }
-      gl_FragColor = sum / 7.0;
-    }
-  `,
-};
-
-// Custom HDR Filmic Grading + Highlight Compression + Subtle Vignette
+// Custom HDR Filmic Grading + Crisp Unsharp Clarity + Subtle Vignette (Zero Blur)
 const CinematicGradeShader = {
   uniforms: {
     tDiffuse: { value: null },
+    uResolution: { value: new THREE.Vector2(1920, 1080) },
     uNightFactor: { value: 0.0 },
     uExposure: { value: 1.0 },
-    uVignette: { value: 0.26 },
+    uVignette: { value: 0.22 },
     uWarmth: { value: 0.05 },
     uHdrBoost: { value: 1.0 },
+    uSharpness: { value: 0.24 },
   },
   vertexShader: `
     varying vec2 vUv;
@@ -88,41 +55,75 @@ const CinematicGradeShader = {
   `,
   fragmentShader: `
     uniform sampler2D tDiffuse;
+    uniform vec2 uResolution;
     uniform float uNightFactor;
     uniform float uExposure;
     uniform float uVignette;
     uniform float uWarmth;
     uniform float uHdrBoost;
+    uniform float uSharpness;
     varying vec2 vUv;
 
     void main() {
       vec4 tex = texture2D(tDiffuse, vUv);
-      vec3 col = tex.rgb * uExposure;
+      vec3 col = tex.rgb;
 
-      // HDR soft-shoulder highlight preservation + local micro-contrast
-      if (uHdrBoost > 0.5) {
-        col = col * (1.0 + 0.14 * smoothstep(0.35, 1.6, col));
+      // Subtle unsharp-mask clarity boost for crisp foliage, stone, face & fabric detail
+      if (uSharpness > 0.01) {
+        vec2 px = 1.0 / max(uResolution, vec2(1.0));
+        vec3 n = texture2D(tDiffuse, vUv + vec2(0.0, px.y)).rgb;
+        vec3 s = texture2D(tDiffuse, vUv - vec2(0.0, px.y)).rgb;
+        vec3 e = texture2D(tDiffuse, vUv + vec2(px.x, 0.0)).rgb;
+        vec3 w = texture2D(tDiffuse, vUv - vec2(px.x, 0.0)).rgb;
+        vec3 neighbors = (n + s + e + w) * 0.25;
+        vec3 detail = clamp(col - neighbors, vec3(-0.22), vec3(0.22));
+        col += detail * uSharpness;
       }
 
-      // Filmic color grading (warm sunset highlights, cool crisp ambient shadows)
+      col *= uExposure;
+
+      // HDR highlight preservation + gentle filmic contrast curve
+      if (uHdrBoost > 0.5) {
+        col = col * (1.0 + 0.14 * smoothstep(0.38, 1.55, col));
+      }
+
+      // Subtle natural vibrance (enhances warm skin SSS, foliage & fabric without oversaturating highlights)
+      float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
+      float maxC = max(col.r, max(col.g, col.b));
+      float minC = min(col.r, min(col.g, col.b));
+      float sat = maxC > 0.001 ? (maxC - minC) / maxC : 0.0;
+      float vibAmt = (1.0 - sat * 0.65) * 0.14;
+      col = mix(vec3(lum), col, 1.0 + vibAmt);
+
+      // Filmic color grading (warm sunset highlights, cool crisp shadows)
       vec3 shadowsTint = mix(vec3(0.96, 0.99, 1.03), vec3(0.84, 0.92, 1.12), uNightFactor);
       vec3 highlightsTint = mix(vec3(1.0 + uWarmth, 1.0, 1.0 - uWarmth * 0.8), vec3(0.92, 0.96, 1.04), uNightFactor);
-      float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
       col *= mix(shadowsTint, highlightsTint, smoothstep(0.14, 0.85, lum));
 
       // Gentle vignette framing
       vec2 centered = vUv - 0.5;
       float vig = 1.0 - dot(centered, centered) * uVignette;
-      col *= clamp(vig, 0.56, 1.0);
+      col *= clamp(vig, 0.6, 1.0);
 
-      gl_FragColor = vec4(col, tex.a);
+      gl_FragColor = vec4(clamp(col, vec3(0.0), vec3(12.0)), tex.a);
     }
   `,
 };
 
+export interface SurvivalLoadProgress {
+  percent: number;
+  stage: string;
+  ready: boolean;
+}
+
 export interface SurvivalEngineCallbacks {
   onTelemetry: (data: HudTelemetry) => void;
   onWebglError: (msg: string) => void;
+  onLoadProgress?: (progress: SurvivalLoadProgress) => void;
+  onMapSwitchProgress?: (progress: SurvivalLoadProgress) => void;
+  initialQuality?: QualityPreset;
+  initialSensitivity?: number;
+  initialMapId?: WorldMapId;
 }
 
 export class SurvivalEngine {
@@ -133,13 +134,9 @@ export class SurvivalEngine {
   private scene!: THREE.Scene;
   private camera!: THREE.PerspectiveCamera;
   private composer!: EffectComposer;
-  private ssaoPass!: SSAOPass;
   private bloomPass!: UnrealBloomPass;
-  private bokehPass!: BokehPass;
-  private motionBlurPass!: ShaderPass;
   private gradePass!: ShaderPass;
   private outputPass!: OutputPass;
-  private fxaaPass!: ShaderPass;
   private smaaPass!: SMAAPass;
 
   private pmremGenerator!: THREE.PMREMGenerator;
@@ -149,11 +146,20 @@ export class SurvivalEngine {
   private reflectionFrameCounter = 0;
 
   private isSoftwareGl = false;
+  private isMobileDevice = false;
+  private virtualLandscape = false;
+  private resizeObserver: ResizeObserver | null = null;
+  private worldReady = false;
+  private hasActiveWorldEntities = false;
+  private isSwitchingMap = false;
+  private mapSwitchSeq = 0;
+  private entered = false;
   private frameId = 0;
   private disposed = false;
   private clock = new THREE.Clock();
   private elapsed = 0;
 
+  private activeMapId: WorldMapId = 'lost_valley';
   private quality: QualityPreset = 'HIGH';
   private graphicsFlags: GraphicsFlags = getPresetGraphicsFlags('HIGH');
   private cameraMode: CameraMode = 'THIRD_PERSON';
@@ -162,10 +168,12 @@ export class SurvivalEngine {
   private timeSpeed = 0.06; // ~6.6 mins per full 24h cycle
 
   private envUniforms = createSharedEnvUniforms();
+  private textures!: ProceduralTextureSet;
   private sunLight!: THREE.DirectionalLight;
   private bounceLight!: THREE.DirectionalLight;
   private hemiLight!: THREE.HemisphereLight;
   private sunGlareSprite!: THREE.Sprite;
+  private skyDome!: THREE.Mesh;
   private sunShaftsGroup!: THREE.Group;
   private sunShaftMat!: THREE.ShaderMaterial;
   private fog!: THREE.FogExp2;
@@ -183,10 +191,11 @@ export class SurvivalEngine {
   private virtualSprint = false;
   private virtualJumpQueued = false;
   private virtualCrouch = false;
-  private lookTouchId: number | null = null;
-  private lastTouchX = 0;
-  private lastTouchY = 0;
+  private activeCanvasPointers = new Map<number, { x: number; y: number }>();
+  private lookPointerId: number | null = null;
   private lastPinchDist: number | null = null;
+  private lastTouchTimestamp = 0;
+  private lookSensitivity = 1.0;
 
   private isDragging = false;
   private lastMouseX = 0;
@@ -233,7 +242,48 @@ export class SurvivalEngine {
   constructor(container: HTMLElement, callbacks: SurvivalEngineCallbacks) {
     this.container = container;
     this.callbacks = callbacks;
-    this.init();
+    this.isMobileDevice =
+      typeof window !== 'undefined' &&
+      (window.matchMedia?.('(pointer: coarse)').matches ||
+        navigator.maxTouchPoints > 0 ||
+        window.innerWidth < 820);
+    const startQuality = callbacks.initialQuality ?? (this.isMobileDevice ? 'MEDIUM' : 'HIGH');
+    this.quality = startQuality;
+    this.graphicsFlags = getPresetGraphicsFlags(startQuality);
+    this.lookSensitivity = callbacks.initialSensitivity ?? (this.isMobileDevice ? 1.6 : 1.0);
+    this.activeMapId = callbacks.initialMapId ?? 'lost_valley';
+    setActiveWorldMap(this.activeMapId);
+    const mapDef = getWorldMapDef(this.activeMapId);
+    this.timeHours = mapDef.defaultTimeHours;
+    this.camYaw = mapDef.spawn.yaw;
+    this.prevCamYaw = mapDef.spawn.yaw;
+    void this.init();
+  }
+
+  private yieldFrame(): Promise<void> {
+    return new Promise((resolve) => {
+      requestAnimationFrame(() => resolve());
+    });
+  }
+
+  private emitProgress(percent: number, stage: string, ready = false): void {
+    if (this.disposed) return;
+    this.callbacks.onLoadProgress?.({ percent, stage, ready });
+  }
+
+  private emitMapSwitchProgress(percent: number, stage: string, ready = false): void {
+    if (this.disposed) return;
+    const payload: SurvivalLoadProgress = { percent, stage, ready };
+    this.callbacks.onMapSwitchProgress?.(payload);
+    if (!this.entered) {
+      this.callbacks.onLoadProgress?.(payload);
+    }
+  }
+
+  public enterWorld(): void {
+    this.entered = true;
+    this.introTimer = 3.4;
+    this.clock.getDelta();
   }
 
   private detectSoftwareGl(): boolean {
@@ -251,7 +301,11 @@ export class SurvivalEngine {
     }
   }
 
-  private init(): void {
+  private async init(): Promise<void> {
+    this.emitProgress(8, 'Initializing WebGL2 & HDR Pipeline');
+    await this.yieldFrame();
+    if (this.disposed) return;
+
     this.isSoftwareGl = this.detectSoftwareGl();
 
     try {
@@ -277,6 +331,7 @@ export class SurvivalEngine {
     canvas.style.display = 'block';
     canvas.style.width = '100%';
     canvas.style.height = '100%';
+    canvas.style.touchAction = 'none';
     canvas.addEventListener('webglcontextlost', (e) => {
       e.preventDefault();
       this.callbacks.onWebglError('Graphics context paused. Restoring...');
@@ -286,6 +341,7 @@ export class SurvivalEngine {
     this.scene = new THREE.Scene();
     this.fog = new THREE.FogExp2(0x9fc2de, 0.0026);
     this.scene.fog = this.fog;
+    this.scene.background = this._skyHoriz;
 
     // Studio baseline environment + Real-time CubeCamera Reflection & Dynamic GI IBL Probe
     this.pmremGenerator = new THREE.PMREMGenerator(this.renderer);
@@ -303,15 +359,21 @@ export class SurvivalEngine {
 
     this.camera = new THREE.PerspectiveCamera(62, w / h, 0.15, 1100);
 
+    this.emitProgress(24, 'Generating Procedural PBR Materials');
+    await this.yieldFrame();
+    if (this.disposed) return;
+
     // Procedural Textures
     const maxAniso = this.renderer.capabilities.getMaxAnisotropy();
     const textures = createProceduralTextures(maxAniso);
+    this.textures = textures;
 
-    // Sky Dome + Volumetric Cloud Shader
+    // Sky Dome + Volumetric Cloud Shader (tracks camera so it never clips beyond camera.far)
     const skyMat = createSkyDomeMaterial(this.envUniforms);
-    const skyDome = new THREE.Mesh(new THREE.SphereGeometry(850, 32, 20), skyMat);
-    skyDome.frustumCulled = false;
-    this.scene.add(skyDome);
+    this.skyDome = new THREE.Mesh(new THREE.SphereGeometry(360, 32, 20), skyMat);
+    this.skyDome.frustumCulled = false;
+    this.skyDome.renderOrder = -100;
+    this.scene.add(this.skyDome);
 
     // Sun Glare / Lens Halo Sprite
     const glareMat = new THREE.SpriteMaterial({
@@ -350,18 +412,29 @@ export class SurvivalEngine {
     this.scene.add(this.sunLight);
     this.scene.add(this.sunLight.target);
 
+    this.emitProgress(46, 'Sculpting Valley Terrain, River & Bridge');
+    await this.yieldFrame();
+    if (this.disposed) return;
+
     // Open World, Character, Wildlife, Combat & Weather/VFX
     const initCfg = QUALITY_CONFIGS[this.quality];
-    this.world = buildOpenWorld(textures, this.envUniforms, initCfg.terrainSegments, initCfg.waterSegments);
+    const mapDef = getWorldMapDef(this.activeMapId);
+    this.world = buildOpenWorld(textures, this.envUniforms, initCfg.terrainSegments, initCfg.waterSegments, mapDef);
     this.scene.add(this.world.root);
 
+    this.emitProgress(68, 'Seeding Pine Forests, Flora & Wildlife');
+    await this.yieldFrame();
+    if (this.disposed) return;
+
     this.character = createCharacterSystem(this.scene, textures);
+    this.character.setPosition(mapDef.spawn.x, mapDef.spawn.z, mapDef.spawn.yaw);
     this.character.state.yaw = this.camYaw;
     this.character.state.pitch = this.camPitch;
     this.character.group.rotation.y = this.camYaw + Math.PI;
 
     this.wildlife = createWildlifeSystem(this.scene, textures.softGlowMap, this.world.flowerPositions);
     this.weatherVfx = createWeatherAndVfxSystem(this.scene, textures, this.world.campfirePos);
+    this.weatherVfx.setWeatherMode(mapDef.defaultWeather);
     this.combat = createCombatSystem(
       this.scene,
       textures,
@@ -391,8 +464,8 @@ export class SurvivalEngine {
         uniform float uOpacity;
         varying vec2 vUv;
         void main() {
-          float edgeX = sin(vUv.x * 3.14159);
-          float beam = pow(edgeX, 2.2) * smoothstep(0.0, 0.35, vUv.y) * smoothstep(1.0, 0.15, vUv.y);
+          float edgeX = max(sin(vUv.x * 3.14159), 1e-4);
+          float beam = pow(edgeX, 2.2) * smoothstep(0.0, 0.35, vUv.y) * (1.0 - smoothstep(0.15, 1.0, vUv.y));
           gl_FragColor = vec4(uColor, beam * uOpacity);
         }
       `,
@@ -421,44 +494,28 @@ export class SurvivalEngine {
     );
     this.smoothCamLook.copy(this.character.state.position).add(new THREE.Vector3(0, 2.2, 0));
 
-    // HDR HalfFloat Post-Processing Pipeline:
-    // Render -> SSAO -> HDR Bloom -> Bokeh DoF -> Motion Blur -> Filmic Grade -> Output(ACES) -> FXAA/SMAA
+    this.emitProgress(86, 'Compiling Shaders & Reflection Probes');
+    await this.yieldFrame();
+    if (this.disposed) return;
+
+    // Crisp HDR HalfFloat MSAA Post-Processing Pipeline (Zero Blur):
+    // Mobile GPUs disable 4x FBO MSAA to sustain smooth 45-60 FPS while keeping HDR + Clarity
     const hdrRenderTarget = new THREE.WebGLRenderTarget(w, h, {
       type: THREE.HalfFloatType,
       format: THREE.RGBAFormat,
+      samples: this.isSoftwareGl || this.isMobileDevice ? 0 : 4,
     });
     this.composer = new EffectComposer(this.renderer, hdrRenderTarget);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
 
-    this.ssaoPass = new SSAOPass(this.scene, this.camera, w, h);
-    this.ssaoPass.kernelRadius = 11;
-    this.ssaoPass.minDistance = 0.004;
-    this.ssaoPass.maxDistance = 0.14;
-    this.ssaoPass.output = SSAOPass.OUTPUT.Default;
-    this.composer.addPass(this.ssaoPass);
-
-    this.bloomPass = new UnrealBloomPass(new THREE.Vector2(w, h), 0.36, 0.52, 0.85);
+    this.bloomPass = new UnrealBloomPass(new THREE.Vector2(w, h), 0.22, 0.22, 0.98);
     this.composer.addPass(this.bloomPass);
-
-    this.bokehPass = new BokehPass(this.scene, this.camera, {
-      focus: 5.0,
-      aspect: w / h,
-      aperture: 0.00018,
-      maxblur: 0.0065,
-    });
-    this.composer.addPass(this.bokehPass);
-
-    this.motionBlurPass = new ShaderPass(MotionBlurShader);
-    this.composer.addPass(this.motionBlurPass);
 
     this.gradePass = new ShaderPass(CinematicGradeShader);
     this.composer.addPass(this.gradePass);
 
     this.outputPass = new OutputPass();
     this.composer.addPass(this.outputPass);
-
-    this.fxaaPass = new ShaderPass(FXAAShader);
-    this.composer.addPass(this.fxaaPass);
 
     this.smaaPass = new SMAAPass();
     this.composer.addPass(this.smaaPass);
@@ -470,7 +527,10 @@ export class SurvivalEngine {
       this.updateReflectionProbe(true);
     }
 
+    this.worldReady = true;
+    this.hasActiveWorldEntities = true;
     this.bindEvents();
+    this.emitProgress(100, 'Expedition Ready', true);
     this.tick();
   }
 
@@ -486,74 +546,117 @@ export class SurvivalEngine {
     window.addEventListener('mouseup', this.onMouseUp);
     window.addEventListener('mousemove', this.onMouseMove);
     dom.addEventListener('wheel', this.onWheel, { passive: true });
-    dom.addEventListener('touchstart', this.onTouchStart, { passive: false });
-    dom.addEventListener('touchmove', this.onTouchMove, { passive: false });
-    dom.addEventListener('touchend', this.onTouchEnd, { passive: false });
-    dom.addEventListener('touchcancel', this.onTouchEnd, { passive: false });
+    dom.addEventListener('pointerdown', this.onCanvasPointerDown);
+    dom.addEventListener('pointermove', this.onCanvasPointerMove);
+    dom.addEventListener('pointerup', this.onCanvasPointerUp);
+    dom.addEventListener('pointercancel', this.onCanvasPointerUp);
+    dom.addEventListener('touchmove', this.onCanvasTouchMovePrevent, { passive: false });
+
+    if (typeof ResizeObserver !== 'undefined') {
+      this.resizeObserver = new ResizeObserver(() => this.onResize());
+      this.resizeObserver.observe(this.container);
+    }
   }
 
-  private onTouchStart = (e: TouchEvent): void => {
-    if (e.cancelable) e.preventDefault();
-    this.introTimer = 0;
-    if (e.touches.length === 2) {
-      this.lookTouchId = null;
-      const dx = e.touches[0].clientX - e.touches[1].clientX;
-      const dy = e.touches[0].clientY - e.touches[1].clientY;
-      this.lastPinchDist = Math.hypot(dx, dy);
-      return;
-    }
-    if (this.lookTouchId === null && e.changedTouches.length > 0) {
-      const t = e.changedTouches[0];
-      this.lookTouchId = t.identifier;
-      this.lastTouchX = t.clientX;
-      this.lastTouchY = t.clientY;
+  private onCanvasTouchMovePrevent = (e: TouchEvent): void => {
+    if (this.entered && e.cancelable) {
+      e.preventDefault();
     }
   };
 
-  private onTouchMove = (e: TouchEvent): void => {
-    if (e.cancelable) e.preventDefault();
-    if (e.touches.length === 2 && this.cameraMode === 'THIRD_PERSON') {
-      const dx = e.touches[0].clientX - e.touches[1].clientX;
-      const dy = e.touches[0].clientY - e.touches[1].clientY;
-      const dist = Math.hypot(dx, dy);
-      if (this.lastPinchDist !== null) {
+  private getCanvasPinchDistance(): number | null {
+    if (this.activeCanvasPointers.size < 2) return null;
+    const it = this.activeCanvasPointers.values();
+    const p1 = it.next().value;
+    const p2 = it.next().value;
+    if (!p1 || !p2) return null;
+    return Math.hypot(p1.x - p2.x, p1.y - p2.y);
+  }
+
+  private onCanvasPointerDown = (e: PointerEvent): void => {
+    if (e.pointerType === 'mouse') return;
+    if (!this.entered || this.isSwitchingMap) return;
+    this.lastTouchTimestamp = performance.now();
+    this.introTimer = 0;
+
+    try {
+      this.renderer.domElement.setPointerCapture?.(e.pointerId);
+    } catch {
+      // Ignore capture errors on synthetic pointers
+    }
+
+    this.activeCanvasPointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    if (this.activeCanvasPointers.size >= 2) {
+      this.lookPointerId = null;
+      this.lastPinchDist = this.getCanvasPinchDistance();
+      return;
+    }
+
+    if (this.lookPointerId === null) {
+      this.lookPointerId = e.pointerId;
+    }
+  };
+
+  private onCanvasPointerMove = (e: PointerEvent): void => {
+    if (e.pointerType === 'mouse') return;
+    if (!this.entered || this.isSwitchingMap) return;
+    if (!this.activeCanvasPointers.has(e.pointerId)) return;
+
+    this.lastTouchTimestamp = performance.now();
+    const prev = this.activeCanvasPointers.get(e.pointerId)!;
+    const rawDx = e.clientX - prev.x;
+    const rawDy = e.clientY - prev.y;
+    prev.x = e.clientX;
+    prev.y = e.clientY;
+
+    const dx = this.virtualLandscape ? rawDy : rawDx;
+    const dy = this.virtualLandscape ? -rawDx : rawDy;
+
+    if (this.activeCanvasPointers.size >= 2 && this.cameraMode === 'THIRD_PERSON') {
+      const dist = this.getCanvasPinchDistance();
+      if (dist !== null && this.lastPinchDist !== null) {
         const delta = this.lastPinchDist - dist;
         this.camDist = THREE.MathUtils.clamp(this.camDist + delta * 0.02, 2.6, 11.5);
       }
       this.lastPinchDist = dist;
       return;
     }
-    if (this.lookTouchId === null) return;
-    for (let i = 0; i < e.changedTouches.length; i++) {
-      const t = e.changedTouches[i];
-      if (t.identifier === this.lookTouchId) {
-        const dx = t.clientX - this.lastTouchX;
-        const dy = t.clientY - this.lastTouchY;
-        this.lastTouchX = t.clientX;
-        this.lastTouchY = t.clientY;
-        const sens = 0.0046;
-        this.camYaw -= dx * sens;
-        this.camPitch = THREE.MathUtils.clamp(this.camPitch - dy * sens, -1.15, 0.85);
-        this.character.state.yaw = this.camYaw;
-        this.character.state.pitch = this.camPitch;
-        break;
-      }
+
+    if (e.pointerId === this.lookPointerId) {
+      const yawSens = 0.0082 * this.lookSensitivity;
+      const pitchSens = 0.0068 * this.lookSensitivity;
+      this.camYaw -= dx * yawSens;
+      this.camPitch = THREE.MathUtils.clamp(this.camPitch - dy * pitchSens, -1.15, 0.85);
+      this.character.state.yaw = this.camYaw;
+      this.character.state.pitch = this.camPitch;
     }
   };
 
-  private onTouchEnd = (e: TouchEvent): void => {
-    if (e.touches.length < 2) {
+  private onCanvasPointerUp = (e: PointerEvent): void => {
+    if (e.pointerType === 'mouse') return;
+    this.lastTouchTimestamp = performance.now();
+    this.activeCanvasPointers.delete(e.pointerId);
+
+    try {
+      if (this.renderer.domElement.hasPointerCapture?.(e.pointerId)) {
+        this.renderer.domElement.releasePointerCapture(e.pointerId);
+      }
+    } catch {
+      // Ignore release errors
+    }
+
+    if (this.activeCanvasPointers.size < 2) {
       this.lastPinchDist = null;
     }
-    for (let i = 0; i < e.changedTouches.length; i++) {
-      if (e.changedTouches[i].identifier === this.lookTouchId) {
-        this.lookTouchId = null;
-      }
+    if (this.lookPointerId === e.pointerId) {
+      this.lookPointerId = null;
     }
-    if (this.lookTouchId === null && e.touches.length === 1) {
-      this.lookTouchId = e.touches[0].identifier;
-      this.lastTouchX = e.touches[0].clientX;
-      this.lastTouchY = e.touches[0].clientY;
+    if (this.lookPointerId === null && this.activeCanvasPointers.size === 1) {
+      const nextId = this.activeCanvasPointers.keys().next().value;
+      if (nextId !== undefined) {
+        this.lookPointerId = nextId;
+      }
     }
   };
 
@@ -570,11 +673,9 @@ export class SurvivalEngine {
     this.renderer.setSize(w, h);
     this.composer.setSize(w, h);
     const pr = this.renderer.getPixelRatio();
-    this.fxaaPass.material.uniforms['resolution'].value.set(1 / (w * pr), 1 / (h * pr));
     this.smaaPass.setSize(w * pr, h * pr);
-    this.ssaoPass.setSize(w, h);
+    this.gradePass.uniforms.uResolution.value.set(w * pr, h * pr);
     this.bloomPass.resolution.set(w, h);
-    (this.bokehPass.uniforms as Record<string, THREE.IUniform>)['aspect'].value = w / h;
   };
 
   private onPointerLockChange = (): void => {
@@ -582,6 +683,8 @@ export class SurvivalEngine {
   };
 
   private onMouseDown = (e: MouseEvent): void => {
+    if (!this.entered || this.isSwitchingMap) return;
+    if (performance.now() - this.lastTouchTimestamp < 900) return;
     this.introTimer = 0;
     if (e.button === 2) {
       this.performMeleeAttack(true);
@@ -596,7 +699,7 @@ export class SurvivalEngine {
     this.isDragging = true;
     this.lastMouseX = e.clientX;
     this.lastMouseY = e.clientY;
-    if (!this.isPointerLocked && this.cameraMode !== 'CINEMATIC_ORBIT') {
+    if (!this.isPointerLocked && this.cameraMode !== 'CINEMATIC_ORBIT' && !this.isMobileDevice) {
       try {
         this.renderer.domElement.requestPointerLock?.();
       } catch {
@@ -610,13 +713,15 @@ export class SurvivalEngine {
   };
 
   private onMouseMove = (e: MouseEvent): void => {
+    if (!this.entered || this.isSwitchingMap) return;
+    if (performance.now() - this.lastTouchTimestamp < 900) return;
     if (!this.isPointerLocked && !this.isDragging) return;
     const dx = this.isPointerLocked ? e.movementX : e.clientX - this.lastMouseX;
     const dy = this.isPointerLocked ? e.movementY : e.clientY - this.lastMouseY;
     this.lastMouseX = e.clientX;
     this.lastMouseY = e.clientY;
 
-    const sens = 0.0024;
+    const sens = 0.0024 * this.lookSensitivity;
     this.camYaw -= dx * sens;
     this.camPitch = THREE.MathUtils.clamp(this.camPitch - dy * sens, -1.15, 0.85);
     this.character.state.yaw = this.camYaw;
@@ -630,6 +735,7 @@ export class SurvivalEngine {
   };
 
   private onKeyDown = (e: KeyboardEvent): void => {
+    if (this.isSwitchingMap) return;
     const code = e.code;
     this.keys.add(code);
 
@@ -749,6 +855,10 @@ export class SurvivalEngine {
   // Public API for React Control Dock
   public setQualityPreset(preset: QualityPreset): void {
     this.graphicsFlags = getPresetGraphicsFlags(preset);
+    if (!this.worldReady) {
+      this.quality = preset;
+      return;
+    }
     this.applyQualityPreset(preset, false);
   }
 
@@ -758,7 +868,9 @@ export class SurvivalEngine {
 
   public setGraphicsFlags(partial: Partial<GraphicsFlags>): GraphicsFlags {
     this.graphicsFlags = { ...this.graphicsFlags, ...partial };
-    this.syncPostProcessingFlags();
+    if (this.worldReady) {
+      this.syncPostProcessingFlags();
+    }
     return { ...this.graphicsFlags };
   }
 
@@ -766,16 +878,14 @@ export class SurvivalEngine {
     const cfg = QUALITY_CONFIGS[this.quality];
     const postOn = !this.isSoftwareGl && cfg.postProcessing;
 
-    this.ssaoPass.enabled = postOn && this.graphicsFlags.giAndAo;
     this.bloomPass.enabled = cfg.bloomEnabled || (postOn && this.graphicsFlags.hdr);
-    this.bokehPass.enabled = postOn && this.graphicsFlags.dof;
-    this.motionBlurPass.enabled = postOn && this.graphicsFlags.motionBlur;
-    this.gradePass.enabled = cfg.gradeEnabled || (postOn && this.graphicsFlags.hdr);
+    this.gradePass.enabled = cfg.gradeEnabled || (postOn && (this.graphicsFlags.hdr || this.graphicsFlags.clarity));
     this.gradePass.uniforms.uHdrBoost.value = this.graphicsFlags.hdr ? 1.0 : 0.0;
-    this.bloomPass.threshold = this.graphicsFlags.hdr ? 0.84 : 0.92;
-    this.bloomPass.strength = this.graphicsFlags.hdr ? 0.38 : 0.24;
+    this.gradePass.uniforms.uSharpness.value = this.graphicsFlags.clarity ? 0.30 : 0.0;
+    this.bloomPass.threshold = this.graphicsFlags.hdr ? 0.94 : 1.04;
+    this.bloomPass.strength = this.graphicsFlags.hdr ? 0.24 : 0.14;
+    this.bloomPass.radius = 0.22;
 
-    this.fxaaPass.enabled = postOn && this.graphicsFlags.antiAliasing === 'FXAA';
     this.smaaPass.enabled = postOn && this.graphicsFlags.antiAliasing === 'SMAA';
 
     this.bounceLight.visible = this.graphicsFlags.giAndAo;
@@ -793,7 +903,8 @@ export class SurvivalEngine {
       return;
     }
     this.reflectionFrameCounter++;
-    if (!force && this.reflectionFrameCounter % 10 !== 0) return;
+    const interval = this.isMobileDevice ? 24 : 10;
+    if (!force && this.reflectionFrameCounter % interval !== 0) return;
 
     const p = this.character.state.position;
     this.cubeCamera.position.set(p.x, Math.max(WATER_LEVEL + 1.8, p.y + 1.4), p.z);
@@ -806,7 +917,9 @@ export class SurvivalEngine {
     this.world.waterMesh.visible = false;
     this.sunGlareSprite.visible = false;
 
+    this.skyDome.position.copy(this.cubeCamera.position);
     this.cubeCamera.update(this.renderer, this.scene);
+    this.skyDome.position.copy(this.camera.position);
 
     this.character.group.visible = prevCharVis;
     this.world.waterMesh.visible = prevWaterVis;
@@ -841,7 +954,7 @@ export class SurvivalEngine {
 
     this.syncPostProcessingFlags();
 
-    this.camera.far = cfg.fogFar * 1.9;
+    this.camera.far = Math.max(920, cfg.fogFar * 2.1);
     this.camera.updateProjectionMatrix();
 
     if (!isInitial && (prev.terrainSegments !== cfg.terrainSegments || prev.waterSegments !== cfg.waterSegments)) {
@@ -851,6 +964,7 @@ export class SurvivalEngine {
   }
 
   public setWeatherMode(mode: WeatherMode): void {
+    if (!this.worldReady) return;
     this.weatherVfx.setWeatherMode(mode);
   }
 
@@ -866,12 +980,26 @@ export class SurvivalEngine {
     this.timePaused = paused;
   }
 
+  public setLookSensitivity(value: number): void {
+    this.lookSensitivity = THREE.MathUtils.clamp(value, 0.4, 3.0);
+  }
+
+  public setVirtualLandscape(enabled: boolean): void {
+    if (this.virtualLandscape === enabled) return;
+    this.virtualLandscape = enabled;
+    if (this.worldReady) {
+      this.onResize();
+    }
+  }
+
   public toggleFlashlight(): boolean {
+    if (!this.worldReady) return false;
     this.character.state.flashlightOn = !this.character.state.flashlightOn;
     return this.character.state.flashlightOn;
   }
 
   public toggleAudio(): boolean {
+    if (!this.worldReady) return false;
     return this.weatherVfx.toggleAudio();
   }
 
@@ -890,8 +1018,92 @@ export class SurvivalEngine {
     this.performDodge();
   }
 
+  public async switchWorldMap(mapId: WorldMapId): Promise<void> {
+    if (this.activeMapId === mapId && this.worldReady && !this.isSwitchingMap) return;
+    const seq = ++this.mapSwitchSeq;
+    this.activeMapId = mapId;
+    setActiveWorldMap(mapId);
+    const mapDef = getWorldMapDef(mapId);
+    if (!this.worldReady) {
+      this.timeHours = mapDef.defaultTimeHours;
+      this.camYaw = mapDef.spawn.yaw;
+      this.prevCamYaw = mapDef.spawn.yaw;
+      return;
+    }
+
+    this.isSwitchingMap = true;
+    try {
+      this.emitMapSwitchProgress(12, 'Preparing Expedition...', false);
+      await this.yieldFrame();
+      if (this.disposed || seq !== this.mapSwitchSeq) return;
+
+      const cfg = QUALITY_CONFIGS[this.quality];
+      if (this.hasActiveWorldEntities) {
+        this.scene.remove(this.world.root);
+        this.world.dispose();
+        this.wildlife.dispose();
+        this.scene.remove(this.combat.root);
+        this.combat.dispose();
+        this.hasActiveWorldEntities = false;
+      }
+
+      this.emitMapSwitchProgress(38, 'Sculpting Valley Terrain, River & Bridge', false);
+      await this.yieldFrame();
+      if (this.disposed || seq !== this.mapSwitchSeq) return;
+
+      this.world = buildOpenWorld(this.textures, this.envUniforms, cfg.terrainSegments, cfg.waterSegments, mapDef);
+      this.scene.add(this.world.root);
+      this.world.updateGrass(mapDef.spawn.x, mapDef.spawn.z, cfg.grassRadius, cfg.grassCount);
+
+      this.emitMapSwitchProgress(68, 'Seeding Pine Forests, Flora & Wildlife', false);
+      await this.yieldFrame();
+      if (this.disposed || seq !== this.mapSwitchSeq) return;
+
+      this.wildlife = createWildlifeSystem(this.scene, this.textures.softGlowMap, this.world.flowerPositions);
+      this.combat = createCombatSystem(
+        this.scene,
+        this.textures,
+        this.world.crateAnchors,
+        this.world.totemAnchors
+      );
+      this.hasActiveWorldEntities = true;
+
+      this.weatherVfx.setCampfirePos(this.world.campfirePos);
+      this.weatherVfx.setWeatherMode(mapDef.defaultWeather);
+      this.timeHours = mapDef.defaultTimeHours;
+
+      this.introTimer = 2.0;
+      this.character.setPosition(mapDef.spawn.x, mapDef.spawn.z, mapDef.spawn.yaw);
+      this.camYaw = mapDef.spawn.yaw;
+      this.camPitch = -0.11;
+      this.smoothCamPos.set(
+        this.character.state.position.x + 8,
+        this.character.state.position.y + 7.5,
+        this.character.state.position.z + 9
+      );
+      this.smoothCamLook.copy(this.character.state.position).add(new THREE.Vector3(0, 1.8, 0));
+
+      this.emitMapSwitchProgress(90, 'Compiling Shaders & Reflection Probes', false);
+      await this.yieldFrame();
+      if (this.disposed || seq !== this.mapSwitchSeq) return;
+
+      if (!this.isSoftwareGl) {
+        this.renderer.compile(this.scene, this.camera);
+        this.updateReflectionProbe(true);
+      }
+
+      this.clock.getDelta();
+      this.emitMapSwitchProgress(100, 'Expedition Ready', true);
+    } finally {
+      if (seq === this.mapSwitchSeq) {
+        this.isSwitchingMap = false;
+      }
+    }
+  }
+
   public teleportToLandmark(id: string): void {
-    const lm = LANDMARKS.find((l) => l.id === id);
+    const mapDef = getWorldMapDef(this.activeMapId);
+    const lm = mapDef.landmarks.find((l) => l.id === id);
     if (!lm) return;
     this.introTimer = 0;
     this.character.setPosition(lm.x, lm.z, lm.yaw);
@@ -1068,17 +1280,19 @@ export class SurvivalEngine {
     const char = this.character.state;
     const isFP = this.cameraMode === 'FIRST_PERSON';
 
-    if (this.introTimer > 0) {
+    if (this.entered && this.introTimer > 0) {
       this.introTimer = Math.max(0, this.introTimer - dt);
     }
     this.cameraTrauma = Math.max(0, this.cameraTrauma - dt * 1.9);
 
-    // Dynamic FOV punch (Sprint, Dodge Dash, Heavy Cleave, Intro Crane)
-    let targetFov = isFP ? 66 : 60;
-    if (this.introTimer > 0) targetFov = 67;
-    else if (char.dodgeTimer > 0) targetFov = 74;
-    else if (char.attackTimer > 0 && char.isHeavyAttack) targetFov = 66;
-    else if (char.isSprinting) targetFov = 70;
+    // Dynamic FOV punch + Portrait Mobile Horizontal FOV Compensation
+    const aspect = this.camera.aspect || 1;
+    const portraitBoost = aspect < 1 ? Math.min(18, (1 - aspect) * 28) : 0;
+    let targetFov = (isFP ? 66 : 60) + portraitBoost;
+    if (this.introTimer > 0) targetFov = 67 + portraitBoost * 0.7;
+    else if (char.dodgeTimer > 0) targetFov = 74 + portraitBoost * 0.8;
+    else if (char.attackTimer > 0 && char.isHeavyAttack) targetFov = 66 + portraitBoost * 0.8;
+    else if (char.isSprinting) targetFov = 70 + portraitBoost * 0.85;
 
     if (Math.abs(this.camera.fov - targetFov) > 0.05) {
       this.camera.fov = THREE.MathUtils.damp(this.camera.fov, targetFov, 8, dt);
@@ -1175,7 +1389,9 @@ export class SurvivalEngine {
       this._camDesired.z += 7.5 * ease;
     }
 
-    const floorCam = groundHeightAt(this._camDesired.x, this._camDesired.z) + 0.55;
+    const terrainCamFloor = groundHeightAt(this._camDesired.x, this._camDesired.z) + 0.55;
+    const waterCamFloor = char.isSwimming ? WATER_LEVEL + 0.35 : -999;
+    const floorCam = Math.max(terrainCamFloor, waterCamFloor);
     if (this._camDesired.y < floorCam) {
       this._camDesired.y = floorCam;
     }
@@ -1184,7 +1400,7 @@ export class SurvivalEngine {
     this.smoothCamPos.lerp(this._camDesired, 1 - Math.exp(-followRate * dt));
     this.smoothCamLook.lerp(this._camTarget, 1 - Math.exp(-15 * dt));
 
-    const postFloor = groundHeightAt(this.smoothCamPos.x, this.smoothCamPos.z) + 0.45;
+    const postFloor = Math.max(groundHeightAt(this.smoothCamPos.x, this.smoothCamPos.z) + 0.45, waterCamFloor);
     if (this.smoothCamPos.y < postFloor) this.smoothCamPos.y = postFloor;
 
     this.camera.position.copy(this.smoothCamPos);
@@ -1197,6 +1413,16 @@ export class SurvivalEngine {
   private tick = (): void => {
     if (this.disposed) return;
 
+    if (this.isSwitchingMap) {
+      this.clock.getDelta();
+      if (this.isSoftwareGl) {
+        this.frameId = window.setTimeout(this.tick, 50);
+      } else {
+        this.frameId = requestAnimationFrame(this.tick);
+      }
+      return;
+    }
+
     const rawDt = this.clock.getDelta();
     const dt = Math.min(0.05, Math.max(0.001, rawDt));
 
@@ -1208,21 +1434,26 @@ export class SurvivalEngine {
     }
     this.elapsed += simDt;
 
-    // Input aggregation (Keyboard + Mobile Virtual Thumbstick)
-    let forward = this.virtualForward;
-    let right = this.virtualRight;
-    if (this.keys.has('KeyW') || this.keys.has('ArrowUp')) forward += 1;
-    if (this.keys.has('KeyS') || this.keys.has('ArrowDown')) forward -= 1;
-    if (this.keys.has('KeyD') || this.keys.has('ArrowRight')) right += 1;
-    if (this.keys.has('KeyA') || this.keys.has('ArrowLeft')) right -= 1;
-    forward = THREE.MathUtils.clamp(forward, -1, 1);
-    right = THREE.MathUtils.clamp(right, -1, 1);
+    // Input aggregation (locked until player clicks Enter World)
+    let forward = this.entered ? this.virtualForward : 0;
+    let right = this.entered ? this.virtualRight : 0;
+    if (this.entered) {
+      if (this.keys.has('KeyW') || this.keys.has('ArrowUp')) forward += 1;
+      if (this.keys.has('KeyS') || this.keys.has('ArrowDown')) forward -= 1;
+      if (this.keys.has('KeyD') || this.keys.has('ArrowRight')) right += 1;
+      if (this.keys.has('KeyA') || this.keys.has('ArrowLeft')) right -= 1;
+      forward = THREE.MathUtils.clamp(forward, -1, 1);
+      right = THREE.MathUtils.clamp(right, -1, 1);
+    }
 
-    const wantJump = this.keys.has('Space') || this.virtualJumpQueued;
+    const wantJump = this.entered && (this.keys.has('Space') || this.virtualJumpQueued);
     this.virtualJumpQueued = false;
     const wantSprint =
-      (this.keys.has('ShiftLeft') || this.keys.has('ShiftRight') || this.virtualSprint) && this.stamina > 5;
-    const wantCrouch = this.keys.has('KeyC') || this.keys.has('ControlLeft') || this.virtualCrouch;
+      this.entered &&
+      (this.keys.has('ShiftLeft') || this.keys.has('ShiftRight') || this.virtualSprint) &&
+      this.stamina > 5;
+    const wantCrouch =
+      this.entered && (this.keys.has('KeyC') || this.keys.has('ControlLeft') || this.virtualCrouch);
 
     const cave = getCaveProximity(this.character.state.position.x, this.character.state.position.z);
     const inCave = cave.inCaveZone;
@@ -1269,22 +1500,24 @@ export class SurvivalEngine {
     }
 
     // Survival vitals dynamics
-    if (this.character.state.isSprinting && this.character.state.moveSpeed > 5.5) {
+    if (this.character.state.isSwimming && this.character.state.isSprinting && this.character.state.moveSpeed > 2.0) {
+      this.stamina = Math.max(0, this.stamina - simDt * 8.5);
+    } else if (this.character.state.isSprinting && this.character.state.moveSpeed > 5.5) {
       this.stamina = Math.max(0, this.stamina - simDt * 14);
     } else {
-      this.stamina = Math.min(100, this.stamina + simDt * 11);
+      this.stamina = Math.min(100, this.stamina + simDt * (this.character.state.isSwimming ? 7.5 : 11));
     }
 
     const nearCamp = this.character.state.position.distanceTo(this.world.campfirePos) < 6.5;
     const targetWarmth =
       nearCamp && this.weatherVfx.campfireLit
         ? 98
-        : 76 - nightFactor * 16 - this.weatherVfx.weather.snowIntensity * 22 - Math.max(0, this.character.state.position.y - 18) * 0.7;
-    this.warmth = THREE.MathUtils.damp(this.warmth, THREE.MathUtils.clamp(targetWarmth, 18, 100), 0.15, simDt);
+        : (this.character.state.isSwimming ? 54 : 76) - nightFactor * 16 - this.weatherVfx.weather.snowIntensity * 22 - Math.max(0, this.character.state.position.y - 18) * 0.7;
+    this.warmth = THREE.MathUtils.damp(this.warmth, THREE.MathUtils.clamp(targetWarmth, 18, 100), this.character.state.isSwimming ? 0.28 : 0.15, simDt);
 
     const { dist: waterDist } = waterDistanceInfo(this.character.state.position.x, this.character.state.position.z);
-    if (waterDist < 0.8) {
-      this.hydration = Math.min(100, this.hydration + simDt * 3);
+    if (waterDist < 0.8 || this.character.state.isSwimming) {
+      this.hydration = Math.min(100, this.hydration + simDt * 4.5);
     } else {
       this.hydration = Math.max(25, this.hydration - simDt * 0.18);
     }
@@ -1306,7 +1539,8 @@ export class SurvivalEngine {
       nightFactor,
       cfg.particleMultiplier,
       inCave,
-      this.world.treePositions
+      this.world.treePositions,
+      this.character.state.isSwimming
     );
 
     // Update Living Wildlife & Insects
@@ -1330,37 +1564,7 @@ export class SurvivalEngine {
 
     // Smooth Cinematic Camera Update (uses full dt so shake & crane stay fluid)
     this.updateCamera(dt, this.elapsed, right);
-
-    // Update Real-Time Motion Blur & Dynamic Depth-of-Field Focus
-    const dYaw = (this.camYaw - this.prevCamYaw) / Math.max(0.008, dt);
-    const dPitch = (this.camPitch - this.prevCamPitch) / Math.max(0.008, dt);
-    this.prevCamYaw = this.camYaw;
-    this.prevCamPitch = this.camPitch;
-    const charState = this.character.state;
-    const dodgeRadial = charState.dodgeTimer > 0 ? 0.024 : charState.isSprinting ? 0.011 : 0.0;
-    this.motionBlurPass.uniforms.uVelocity.value.set(
-      THREE.MathUtils.clamp(-dYaw * 0.0022, -0.015, 0.015),
-      THREE.MathUtils.clamp(dPitch * 0.0022, -0.015, 0.015)
-    );
-    this.motionBlurPass.uniforms.uRadial.value = THREE.MathUtils.damp(
-      this.motionBlurPass.uniforms.uRadial.value,
-      dodgeRadial,
-      12,
-      dt
-    );
-
-    const focusDist =
-      this.cameraMode === 'THIRD_PERSON'
-        ? this.camDist
-        : this.cameraMode === 'CINEMATIC_ORBIT'
-        ? this.camera.position.distanceTo(charState.position)
-        : 18.0;
-    (this.bokehPass.uniforms as Record<string, THREE.IUniform>)['focus'].value = THREE.MathUtils.damp(
-      (this.bokehPass.uniforms as Record<string, THREE.IUniform>)['focus'].value,
-      focusDist,
-      10,
-      dt
-    );
+    this.skyDome.position.copy(this.camera.position);
 
     // Update Real-Time Reflection & Global Illumination Probe (throttled on hardware GL)
     this.updateReflectionProbe(false);
@@ -1387,11 +1591,14 @@ export class SurvivalEngine {
       const biome = getDominantBiome(p.x, p.z, p.y);
       const heading = (((-THREE.MathUtils.radToDeg(this.camYaw)) % 360) + 360) % 360;
       this.callbacks.onTelemetry({
+        activeMapId: this.activeMapId,
         biomeLabel: biome.label,
         timeHours: this.timeHours,
         weatherLabel: this.weatherVfx.weather.label,
         headingDeg: Math.round(heading),
         elevation: Math.round(p.y * 10) / 10,
+        playerX: Math.round(p.x * 10) / 10,
+        playerZ: Math.round(p.z * 10) / 10,
         speedMs: Math.round(this.character.state.moveSpeed * 10) / 10,
         stamina: Math.round(this.stamina),
         warmth: Math.round(this.warmth),
@@ -1399,6 +1606,7 @@ export class SurvivalEngine {
         nearCampfire: nearCamp,
         campfireLit: this.weatherVfx.campfireLit,
         nearWater: waterDist < 3.5,
+        isSwimming: this.character.state.isSwimming,
         inCave: inCave > 0.45,
         flashlightOn: this.character.state.flashlightOn,
         fps: this.currentFps,
@@ -1443,14 +1651,22 @@ export class SurvivalEngine {
     this.renderer?.domElement?.removeEventListener('mousedown', this.onMouseDown);
     this.renderer?.domElement?.removeEventListener('contextmenu', this.onContextMenu);
     this.renderer?.domElement?.removeEventListener('wheel', this.onWheel);
-    this.renderer?.domElement?.removeEventListener('touchstart', this.onTouchStart);
-    this.renderer?.domElement?.removeEventListener('touchmove', this.onTouchMove);
-    this.renderer?.domElement?.removeEventListener('touchend', this.onTouchEnd);
-    this.renderer?.domElement?.removeEventListener('touchcancel', this.onTouchEnd);
+    this.renderer?.domElement?.removeEventListener('pointerdown', this.onCanvasPointerDown);
+    this.renderer?.domElement?.removeEventListener('pointermove', this.onCanvasPointerMove);
+    this.renderer?.domElement?.removeEventListener('pointerup', this.onCanvasPointerUp);
+    this.renderer?.domElement?.removeEventListener('pointercancel', this.onCanvasPointerUp);
+    this.renderer?.domElement?.removeEventListener('touchmove', this.onCanvasTouchMovePrevent);
     window.removeEventListener('mouseup', this.onMouseUp);
     window.removeEventListener('mousemove', this.onMouseMove);
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
 
-    this.combat?.dispose();
+    if (this.hasActiveWorldEntities) {
+      this.world?.dispose();
+      this.wildlife?.dispose();
+      this.combat?.dispose();
+      this.hasActiveWorldEntities = false;
+    }
     this.weatherVfx?.dispose();
     this.dynamicEnvRT?.dispose();
     this.cubeRenderTarget?.dispose();

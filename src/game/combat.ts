@@ -192,8 +192,8 @@ function createSlashMaterial(isHeavy: boolean): THREE.ShaderMaterial {
         // Fade cleanly near end of animation
         float lifeFade = 1.0 - smoothstep(0.55, 1.0, uProgress);
         // Sharp bright outer blade edge
-        float edgeGlow = pow(smoothstep(0.0, 0.85, vUv.y), 1.6) * smoothstep(1.0, 0.9, vUv.y);
-        float coreBlade = smoothstep(0.58, 0.86, vUv.y) * smoothstep(0.99, 0.88, vUv.y);
+        float edgeGlow = pow(max(smoothstep(0.0, 0.85, vUv.y), 1e-4), 1.6) * (1.0 - smoothstep(0.9, 1.0, vUv.y));
+        float coreBlade = smoothstep(0.58, 0.86, vUv.y) * (1.0 - smoothstep(0.88, 0.99, vUv.y));
 
         float alpha = (edgeGlow * 0.85 + coreBlade * 0.95) * trailMask * lifeFade;
         vec3 col = mix(uEdgeColor, uCoreColor, coreBlade);

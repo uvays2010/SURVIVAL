@@ -22,6 +22,7 @@ export interface WeatherVfxSystem {
   campfireLit: boolean;
   setWeatherMode: (mode: WeatherMode) => void;
   toggleCampfire: () => void;
+  setCampfirePos: (pos: THREE.Vector3) => void;
   toggleAudio: () => boolean;
   isAudioEnabled: () => boolean;
   update: (
@@ -33,7 +34,8 @@ export interface WeatherVfxSystem {
     nightFactor: number,
     particleMult: number,
     inCave: number,
-    treePositions: { x: number; y: number; z: number }[]
+    treePositions: { x: number; y: number; z: number }[],
+    isSwimming: boolean
   ) => void;
   dispose: () => void;
 }
@@ -410,7 +412,8 @@ export function createWeatherAndVfxSystem(
     nightFactor: number,
     particleMult: number,
     inCave: number,
-    treePositions: { x: number; y: number; z: number }[]
+    treePositions: { x: number; y: number; z: number }[],
+    isSwimming: boolean
   ) => {
     // Dynamic Weather State Machine
     if (weather.mode === 'DYNAMIC') {
@@ -704,7 +707,13 @@ export function createWeatherAndVfxSystem(
       const fireProximity = campfireLit ? Math.max(0, 1 - fireDist / 16) * 0.08 : 0;
       if (fireGain) fireGain.gain.setTargetAtTime(fireProximity, t, 0.2);
 
-      if (isGrounded && playerMoveSpeed > 0.6) {
+      if (isSwimming && playerMoveSpeed > 0.45) {
+        stepAccum += dt * (0.9 + playerMoveSpeed * 0.25);
+        if (stepAccum >= 1) {
+          stepAccum = 0;
+          playFootstep(true);
+        }
+      } else if (isGrounded && playerMoveSpeed > 0.6) {
         stepAccum += dt * (playerMoveSpeed * 0.42);
         if (stepAccum >= 1) {
           stepAccum = 0;
@@ -712,6 +721,17 @@ export function createWeatherAndVfxSystem(
         }
       }
     }
+  };
+
+  const setCampfirePos = (pos: THREE.Vector3) => {
+    campfirePos.copy(pos);
+    fireGroup.position.copy(pos).add(new THREE.Vector3(0, 0.12, 0));
+    for (let i = 0; i < SPARK_COUNT; i++) {
+      sparkPos[i * 3] = pos.x;
+      sparkPos[i * 3 + 1] = pos.y + 0.3;
+      sparkPos[i * 3 + 2] = pos.z;
+    }
+    sparkGeo.attributes.position.needsUpdate = true;
   };
 
   const dispose = () => {
@@ -727,6 +747,7 @@ export function createWeatherAndVfxSystem(
     },
     setWeatherMode,
     toggleCampfire,
+    setCampfirePos,
     toggleAudio,
     isAudioEnabled: () => audioEnabled,
     update,

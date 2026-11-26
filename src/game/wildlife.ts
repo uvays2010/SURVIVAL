@@ -73,6 +73,7 @@ export interface WildlifeSystem {
     nightFactor: number,
     rainIntensity: number
   ) => void;
+  dispose: () => void;
 }
 
 function buildQuadruped(
@@ -623,5 +624,17 @@ export function createWildlifeSystem(
     }
   };
 
-  return { root, checkMeleeHit, update };
+  const dispose = () => {
+    root.traverse((obj) => {
+      const m = obj as THREE.Mesh;
+      if (m.geometry) m.geometry.dispose();
+      if (m.material) {
+        if (Array.isArray(m.material)) m.material.forEach((mat) => mat.dispose());
+        else m.material.dispose();
+      }
+    });
+    scene.remove(root);
+  };
+
+  return { root, checkMeleeHit, update, dispose };
 }

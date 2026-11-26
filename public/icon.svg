@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <radialGradient id="bgGrad" cx="50%" cy="35%" r="72%">
+      <stop offset="0%" stop-color="#1d2633" />
+      <stop offset="55%" stop-color="#10151d" />
+      <stop offset="100%" stop-color="#0b0e11" />
+    </radialGradient>
+    <linearGradient id="sunGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#fbbf24" />
+      <stop offset="65%" stop-color="#f59e0b" />
+      <stop offset="100%" stop-color="#d97706" />
+    </linearGradient>
+    <linearGradient id="peakGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#f5f5f4" />
+      <stop offset="100%" stop-color="#a8a29e" />
+    </linearGradient>
+    <linearGradient id="riverGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#0284c7" />
+    </linearGradient>
+  </defs>
+
+  <!-- Full bleed obsidian backdrop -->
+  <rect width="512" height="512" fill="url(#bgGrad)" />
+
+  <!-- Outer compass ring inside 80% safe zone (center 256,256, radius 172) -->
+  <circle cx="256" cy="256" r="172" fill="none" stroke="#f59e0b" stroke-opacity="0.35" stroke-width="6" />
+  <circle cx="256" cy="256" r="154" fill="#0d1218" stroke="#f59e0b" stroke-opacity="0.7" stroke-width="3" />
+
+  <!-- Golden sunset disc -->
+  <circle cx="256" cy="204" r="62" fill="url(#sunGrad)" />
+
+  <!-- Mountain peaks silhouette -->
+  <polygon points="122,308 206,192 276,274 316,220 390,308" fill="#18202c" />
+  <polygon points="154,308 206,204 260,308" fill="url(#peakGrad)" fill-opacity="0.9" />
+  <polygon points="274,308 316,226 364,308" fill="url(#peakGrad)" fill-opacity="0.72" />
+
+  <!-- Winding river reflection -->
+  <path d="M 164 328 C 216 314, 294 314, 348 328 C 314 358, 224 360, 164 328 Z" fill="url(#riverGrad)" fill-opacity="0.92" />
+
+  <!-- Compass cardinal ticks -->
+  <polygon points="256,64 266,94 246,94" fill="#fbbf24" />
+  <polygon points="256,448 266,418 246,418" fill="#fbbf24" fill-opacity="0.6" />
+  <polygon points="64,256 94,246 94,266" fill="#fbbf24" fill-opacity="0.6" />
+  <polygon points="448,256 418,246 418,266" fill="#fbbf24" fill-opacity="0.6" />
+</svg>

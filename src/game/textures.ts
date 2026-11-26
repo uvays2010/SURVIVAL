@@ -15,6 +15,9 @@ export interface ProceduralTextureSet {
   plasterWallMap: THREE.CanvasTexture;
   rustMetalMap: THREE.CanvasTexture;
   fabricMap: THREE.CanvasTexture;
+  fabricNormal: THREE.CanvasTexture;
+  hairMap: THREE.CanvasTexture;
+  irisMap: THREE.CanvasTexture;
   leafAlphaMap: THREE.CanvasTexture;
   grassBladeMap: THREE.CanvasTexture;
   softGlowMap: THREE.CanvasTexture;
@@ -322,24 +325,97 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
   rustCtx.putImageData(rustImg, 0, 0);
   const rustMetalMap = finalizeTexture(rustC, true, true, aniso);
 
-  // 9. Woven Outdoor Fabric (256x256 Character jacket & backpack)
-  const [fabC, fabCtx] = makeCanvas(256);
-  const fabImg = fabCtx.createImageData(256, 256);
-  for (let y = 0; y < 256; y++) {
-    for (let x = 0; x < 256; x++) {
-      const weave = ((x % 4 < 2) !== (y % 4 < 2)) ? 1.09 : 0.89;
-      const microThread = ((x + y) % 2 === 0) ? 1.02 : 0.98;
-      const wear = tileFbm(x / 256, y / 256, 8, 4, 1409) * 0.22 + 0.84;
-      const idx = (y * 256 + x) * 4;
-      const val = Math.min(255, Math.round(218 * weave * microThread * wear));
-      fabImg.data[idx] = val;
-      fabImg.data[idx + 1] = val;
-      fabImg.data[idx + 2] = val;
+  // 9. High-Resolution Woven Explorer Twill Fabric + Normal Map (512x512)
+  const fabSize = 512;
+  const [fabC, fabCtx] = makeCanvas(fabSize);
+  const fabImg = fabCtx.createImageData(fabSize, fabSize);
+  const fabH = new Float32Array(fabSize * fabSize);
+  for (let y = 0; y < fabSize; y++) {
+    for (let x = 0; x < fabSize; x++) {
+      const u = x / fabSize;
+      const v = y / fabSize;
+      // Diagonal twill weave + fine warp/weft thread micro-relief
+      const twill = ((x + y) % 6 < 3) ? 1.07 : 0.91;
+      const cross = ((x - y + fabSize) % 6 < 2) ? 1.04 : 0.96;
+      const microThread = Math.sin(x * Math.PI * 0.5) * 0.03 + Math.sin(y * Math.PI * 0.5) * 0.03;
+      const wear = tileFbm(u, v, 8, 4, 1409) * 0.16 + 0.88;
+      const fine = tileFbm(u, v, 24, 2, 1427) * 0.08;
+      const idx = (y * fabSize + x) * 4;
+      const shade = Math.min(255, Math.round(224 * twill * cross * (wear + fine) + microThread * 18));
+      fabImg.data[idx] = shade;
+      fabImg.data[idx + 1] = shade;
+      fabImg.data[idx + 2] = shade;
       fabImg.data[idx + 3] = 255;
+      fabH[y * fabSize + x] = (twill - 0.9) * 0.45 + microThread + fine * 0.7;
     }
   }
   fabCtx.putImageData(fabImg, 0, 0);
   const fabricMap = finalizeTexture(fabC, true, true, aniso);
+  const fabricNormal = buildNormalFromHeight(fabH, fabSize, 1.35, aniso);
+
+  // 9b. High-Resolution Silky Anisotropic Hair Strand Texture (512x512)
+  const hairSize = 512;
+  const [hairC, hairCtx] = makeCanvas(hairSize);
+  const hairImg = hairCtx.createImageData(hairSize, hairSize);
+  for (let y = 0; y < hairSize; y++) {
+    const v = y / hairSize;
+    // Root darker, mid warm chestnut, tips slightly sun-kissed
+    const lengthShade = 0.76 + Math.sin(v * Math.PI) * 0.22 + v * 0.1;
+    for (let x = 0; x < hairSize; x++) {
+      const u = x / hairSize;
+      const strandA = Math.sin(u * Math.PI * 160 + tileFbm(u, v, 6, 2, 911) * 4.5) * 0.5 + 0.5;
+      const strandB = Math.sin(u * Math.PI * 340 + v * 6.0) * 0.5 + 0.5;
+      const bundle = tileFbm(u * 2.5, v * 0.4, 8, 3, 947);
+      const sheenBand = Math.exp(-Math.pow((v - 0.42) * 3.8, 2)) * (0.28 + 0.32 * strandA);
+      const tone = (0.72 + strandA * 0.22 + strandB * 0.08 + bundle * 0.14 + sheenBand) * lengthShade;
+      const idx = (y * hairSize + x) * 4;
+      hairImg.data[idx] = Math.min(255, Math.round(92 * tone));
+      hairImg.data[idx + 1] = Math.min(255, Math.round(58 * tone));
+      hairImg.data[idx + 2] = Math.min(255, Math.round(42 * tone));
+      hairImg.data[idx + 3] = 255;
+    }
+  }
+  hairCtx.putImageData(hairImg, 0, 0);
+  const hairMap = finalizeTexture(hairC, true, true, aniso);
+
+  // 9c. High-Resolution Radiant Emerald-Hazel Radial Iris Texture (256x256)
+  const [irisC, irisCtx] = makeCanvas(256);
+  irisCtx.fillStyle = '#0f241c';
+  irisCtx.fillRect(0, 0, 256, 256);
+  const irisGrad = irisCtx.createRadialGradient(128, 128, 18, 128, 128, 124);
+  irisGrad.addColorStop(0.0, '#120c08');
+  irisGrad.addColorStop(0.26, '#c78a3e'); // Warm golden-amber inner collarette
+  irisGrad.addColorStop(0.45, '#3b8b6c'); // Vivid jade-emerald iris body
+  irisGrad.addColorStop(0.8, '#1e5b49');
+  irisGrad.addColorStop(0.95, '#0b221b'); // Dark limbal ring
+  irisGrad.addColorStop(1.0, '#071410');
+  irisCtx.fillStyle = irisGrad;
+  irisCtx.beginPath();
+  irisCtx.arc(128, 128, 124, 0, Math.PI * 2);
+  irisCtx.fill();
+  // Fine radial stromal fibers
+  for (let i = 0; i < 140; i++) {
+    const ang = (i / 140) * Math.PI * 2 + hash2(i, 1, 303) * 0.04;
+    const r0 = 32 + hash2(i, 2, 303) * 14;
+    const r1 = 96 + hash2(i, 3, 303) * 20;
+    irisCtx.strokeStyle =
+      i % 3 === 0
+        ? 'rgba(235, 198, 120, 0.34)'
+        : i % 2 === 0
+        ? 'rgba(130, 232, 192, 0.28)'
+        : 'rgba(18, 58, 44, 0.35)';
+    irisCtx.lineWidth = 1.2 + hash2(i, 4, 303) * 1.4;
+    irisCtx.beginPath();
+    irisCtx.moveTo(128 + Math.cos(ang) * r0, 128 + Math.sin(ang) * r0);
+    irisCtx.lineTo(128 + Math.cos(ang) * r1, 128 + Math.sin(ang) * r1);
+    irisCtx.stroke();
+  }
+  // Crisp obsidian pupil center
+  irisCtx.fillStyle = '#070709';
+  irisCtx.beginPath();
+  irisCtx.arc(128, 128, 36, 0, Math.PI * 2);
+  irisCtx.fill();
+  const irisMap = finalizeTexture(irisC, true, false, aniso);
 
   // 10. Leaf Cluster Alpha/Color Texture (for crisp foliage cards)
   const [leafC, leafCtx] = makeCanvas(128);
@@ -437,121 +513,92 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
   fpCtx.fill();
   const footprintMap = finalizeTexture(fpC, true, false, aniso);
 
-  // 16. Detailed Character Face Portrait Texture (512x512 Spherical UV aligned front at u=0.5)
-  const [faceC, faceCtx] = makeCanvas(512);
+  // 16. High-Resolution Luminous Feminine Face Texture (1024x1024 Spherical UV aligned front at u=0.5)
+  // Note: 3D eyeballs, animated eyelids, eyebrows, nose, and lips sit atop this canvas skin map so there are no flat painted eyeballs!
+  const [faceC, faceCtx] = makeCanvas(1024);
   faceCtx.save();
-  faceCtx.scale(2, 2);
-  // Warm realistic skin base with subtle cheek & forehead tone variation
+  faceCtx.scale(4, 4); // Draw cleanly on normalized 256x256 portrait grid at full 1024px resolution
+
+  // Warm radiant porcelain-peach skin gradient with natural undertone transitions
   const skinGrad = faceCtx.createLinearGradient(0, 0, 0, 256);
-  skinGrad.addColorStop(0, '#c7926f');
-  skinGrad.addColorStop(0.45, '#d8a481');
-  skinGrad.addColorStop(0.75, '#c99371');
-  skinGrad.addColorStop(1, '#b47f5f');
+  skinGrad.addColorStop(0, '#ecc2a6');
+  skinGrad.addColorStop(0.38, '#f4cfb6');
+  skinGrad.addColorStop(0.7, '#ecc1a5');
+  skinGrad.addColorStop(1, '#dcad8f');
   faceCtx.fillStyle = skinGrad;
   faceCtx.fillRect(0, 0, 256, 256);
 
-  // Subtle skin pore micro-variation & freckles
-  for (let p = 0; p < 220; p++) {
-    const px = 76 + hash2(p, 1, 777) * 104;
-    const py = 94 + hash2(p, 2, 777) * 96;
-    faceCtx.fillStyle = p % 2 === 0 ? 'rgba(130, 82, 58, 0.08)' : 'rgba(255, 226, 204, 0.08)';
-    faceCtx.fillRect(px, py, 0.9, 0.9);
+  // Subtle translucent skin pore micro-luminance & delicate sun-kissed freckles across nose & cheeks
+  for (let p = 0; p < 520; p++) {
+    const px = 72 + hash2(p, 1, 777) * 112;
+    const py = 84 + hash2(p, 2, 777) * 110;
+    faceCtx.fillStyle = p % 3 === 0 ? 'rgba(182, 114, 88, 0.055)' : 'rgba(255, 240, 228, 0.065)';
+    faceCtx.fillRect(px, py, 0.65, 0.65);
+  }
+  for (let f = 0; f < 34; f++) {
+    const fx = 96 + hash2(f, 5, 881) * 64;
+    const fy = 128 + hash2(f, 6, 881) * 20;
+    faceCtx.fillStyle = 'rgba(176, 108, 76, 0.14)';
+    faceCtx.beginPath();
+    faceCtx.arc(fx, fy, 0.65 + hash2(f, 7, 881) * 0.45, 0, Math.PI * 2);
+    faceCtx.fill();
   }
 
-  // Warm subsurface cheek & nose blush
+  // Warm SSS rose-coral cheek blush, temple warmth, and delicate nose/chin glow
   for (const [cx, cy, r, col] of [
-    [104, 142, 22, 'rgba(186, 98, 76, 0.22)'],
-    [152, 142, 22, 'rgba(186, 98, 76, 0.22)'],
-    [128, 134, 14, 'rgba(195, 110, 84, 0.18)'],
+    [101, 138, 22, 'rgba(232, 118, 102, 0.24)'],
+    [155, 138, 22, 'rgba(232, 118, 102, 0.24)'],
+    [128, 133, 12, 'rgba(226, 124, 104, 0.15)'],
+    [128, 174, 16, 'rgba(224, 132, 112, 0.12)'],
+    [128, 86, 48, 'rgba(255, 232, 214, 0.18)'],
   ] as const) {
-    const cg = faceCtx.createRadialGradient(cx, cy, 2, cx, cy, r);
+    const cg = faceCtx.createRadialGradient(cx, cy, 1, cx, cy, r);
     cg.addColorStop(0, col);
     cg.addColorStop(1, 'rgba(0,0,0,0)');
     faceCtx.fillStyle = cg;
     faceCtx.fillRect(cx - r, cy - r, r * 2, r * 2);
   }
 
-  // Rugged subtle beard/stubble jawline shadow
-  const beardGrad = faceCtx.createLinearGradient(0, 142, 0, 212);
-  beardGrad.addColorStop(0, 'rgba(42, 31, 24, 0.0)');
-  beardGrad.addColorStop(0.4, 'rgba(42, 31, 24, 0.28)');
-  beardGrad.addColorStop(1, 'rgba(35, 25, 19, 0.48)');
-  faceCtx.fillStyle = beardGrad;
-  faceCtx.beginPath();
-  faceCtx.ellipse(128, 178, 42, 34, 0, 0, Math.PI * 2);
-  faceCtx.fill();
-
-  // Eyebrows
-  faceCtx.strokeStyle = '#2c2018';
-  faceCtx.lineWidth = 4.2;
-  faceCtx.lineCap = 'round';
-  faceCtx.beginPath();
-  faceCtx.moveTo(96, 112);
-  faceCtx.quadraticCurveTo(108, 106, 119, 111);
-  faceCtx.moveTo(160, 112);
-  faceCtx.quadraticCurveTo(148, 106, 137, 111);
-  faceCtx.stroke();
-
-  // Detailed Eyes (Sclera, Hazel-Amber Iris, Pupil, Upper Lash, Specular Catchlight)
-  for (const ex of [108, 148]) {
-    // Eye socket shadow
-    faceCtx.fillStyle = 'rgba(90, 56, 40, 0.28)';
-    faceCtx.beginPath();
-    faceCtx.ellipse(ex, 122, 11, 6.5, 0, 0, Math.PI * 2);
-    faceCtx.fill();
-
-    // Sclera
-    faceCtx.fillStyle = '#ede7e1';
-    faceCtx.beginPath();
-    faceCtx.ellipse(ex, 122, 8.2, 4.4, 0, 0, Math.PI * 2);
-    faceCtx.fill();
-
-    // Iris
-    faceCtx.fillStyle = '#5a4428';
-    faceCtx.beginPath();
-    faceCtx.arc(ex, 122, 4.1, 0, Math.PI * 2);
-    faceCtx.fill();
-
-    // Pupil
-    faceCtx.fillStyle = '#120e0b';
-    faceCtx.beginPath();
-    faceCtx.arc(ex, 122, 2.0, 0, Math.PI * 2);
-    faceCtx.fill();
-
-    // Specular catchlight
-    faceCtx.fillStyle = 'rgba(255, 255, 255, 0.9)';
-    faceCtx.beginPath();
-    faceCtx.arc(ex - 1.3, 120.7, 1.0, 0, Math.PI * 2);
-    faceCtx.fill();
-
-    // Upper eyelid crease
-    faceCtx.strokeStyle = '#332219';
-    faceCtx.lineWidth = 1.6;
-    faceCtx.beginPath();
-    faceCtx.arc(ex, 123, 8.4, Math.PI * 1.1, Math.PI * 1.9);
-    faceCtx.stroke();
+  // Delicate cheekbone & jawline contouring (soft golden-tan contour underneath cheek blush)
+  for (const sx of [-1, 1]) {
+    const jg = faceCtx.createRadialGradient(128 + sx * 36, 158, 2, 128 + sx * 36, 158, 26);
+    jg.addColorStop(0, 'rgba(168, 106, 82, 0.14)');
+    jg.addColorStop(1, 'rgba(0,0,0,0)');
+    faceCtx.fillStyle = jg;
+    faceCtx.fillRect(128 + sx * 36 - 26, 158 - 26, 52, 52);
   }
 
-  // Nose bridge highlight & nostrils shadow
-  faceCtx.fillStyle = 'rgba(255, 224, 198, 0.25)';
-  faceCtx.fillRect(126, 120, 4, 20);
-  faceCtx.fillStyle = 'rgba(85, 50, 36, 0.35)';
-  faceCtx.beginPath();
-  faceCtx.ellipse(124, 143, 2.6, 1.6, 0, 0, Math.PI * 2);
-  faceCtx.ellipse(132, 143, 2.6, 1.6, 0, 0, Math.PI * 2);
-  faceCtx.fill();
+  // Soft orbital eye-socket warmth & subtle natural lash-line shadow (3D eyes sit cleanly inside)
+  for (const ex of [110, 146]) {
+    const og = faceCtx.createRadialGradient(ex, 121, 2, ex, 121, 14);
+    og.addColorStop(0, 'rgba(132, 82, 68, 0.28)');
+    og.addColorStop(0.65, 'rgba(162, 104, 86, 0.14)');
+    og.addColorStop(1, 'rgba(0,0,0,0)');
+    faceCtx.fillStyle = og;
+    faceCtx.fillRect(ex - 14, 121 - 14, 28, 28);
+  }
 
-  // Natural Lips
-  faceCtx.fillStyle = '#9e6254';
-  faceCtx.beginPath();
-  faceCtx.ellipse(128, 160, 11.5, 3.2, 0, 0, Math.PI * 2);
-  faceCtx.fill();
-  faceCtx.strokeStyle = '#6c3c32';
-  faceCtx.lineWidth = 1.2;
-  faceCtx.beginPath();
-  faceCtx.moveTo(117, 160);
-  faceCtx.quadraticCurveTo(128, 162, 139, 160);
-  faceCtx.stroke();
+  // Subtle nose bridge highlight & soft philtrum / chin dimple shading
+  const noseHi = faceCtx.createLinearGradient(125, 116, 131, 140);
+  noseHi.addColorStop(0, 'rgba(255, 240, 228, 0.22)');
+  noseHi.addColorStop(1, 'rgba(255, 240, 228, 0.04)');
+  faceCtx.fillStyle = noseHi;
+  faceCtx.fillRect(126.2, 116, 3.6, 22);
+
+  // Soft base rose lip blush beneath sculpted 3D lips
+  const lipGlow = faceCtx.createRadialGradient(128, 156, 2, 128, 156, 14);
+  lipGlow.addColorStop(0, 'rgba(196, 88, 86, 0.42)');
+  lipGlow.addColorStop(1, 'rgba(0,0,0,0)');
+  faceCtx.fillStyle = lipGlow;
+  faceCtx.fillRect(114, 142, 28, 28);
+
+  // Soft natural hairline shadow along forehead crown & nape
+  const hairline = faceCtx.createLinearGradient(0, 24, 0, 72);
+  hairline.addColorStop(0, 'rgba(58, 36, 26, 0.72)');
+  hairline.addColorStop(0.55, 'rgba(90, 56, 40, 0.22)');
+  hairline.addColorStop(1, 'rgba(0,0,0,0)');
+  faceCtx.fillStyle = hairline;
+  faceCtx.fillRect(0, 0, 256, 72);
 
   faceCtx.restore();
   const faceMap = finalizeTexture(faceC, true, false, aniso);
@@ -588,6 +635,9 @@ export function createProceduralTextures(maxAnisotropy: number): ProceduralTextu
     plasterWallMap,
     rustMetalMap,
     fabricMap,
+    fabricNormal,
+    hairMap,
+    irisMap,
     leafAlphaMap,
     grassBladeMap,
     softGlowMap,
