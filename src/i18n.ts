@@ -177,6 +177,28 @@ export interface TranslationBundle {
     };
   };
   worldMaps: Record<WorldMapId, { name: string; desc: string }>;
+  multiplayer: {
+    buttonLabel: string;
+    title: string;
+    connected: string;
+    connecting: string;
+    reconnecting: string;
+    disconnected: string;
+    yourName: string;
+    saveName: string;
+    roomCode: string;
+    joinRoom: string;
+    copyInvite: string;
+    copied: string;
+    playersInRoom: string;
+    onlyYou: string;
+    youBadge: string;
+    goToPlayer: string;
+    chatTitle: string;
+    chatPlaceholder: string;
+    send: string;
+    noMessages: string;
+  };
   webglErrorFallback: string;
 }
 
@@ -446,6 +468,28 @@ export const TRANSLATIONS: Record<GameLang, TranslationBundle> = {
       twin_fjords: { name: 'Egizak fyordlar', desc: 'Chuqur bo‘g‘ozlar va tik qoyalar' },
       highland_meadows: { name: 'Tog‘ yaylovlari', desc: 'Gulli adirlar va sokin daryo' },
     },
+    multiplayer: {
+      buttonLabel: 'Onlayn',
+      title: 'Onlayn birga o‘ynash',
+      connected: 'Onlayn ulangan',
+      connecting: 'Ulanmoqda...',
+      reconnecting: 'Qayta ulanmoqda...',
+      disconnected: 'Uzilgan',
+      yourName: 'Ismingiz',
+      saveName: 'Saqlash',
+      roomCode: 'Xona kodi',
+      joinRoom: 'Kirish',
+      copyInvite: 'Taklif havolasi',
+      copied: 'Nusxalandi!',
+      playersInRoom: 'Xonadagi o‘yinchilar',
+      onlyYou: 'Hozircha xonada faqat siz borsiz. Do‘stlaringizga havolani yuboring!',
+      youBadge: 'Siz',
+      goToPlayer: 'Yoniga borish',
+      chatTitle: 'Xona chati',
+      chatPlaceholder: 'Xabar yozing...',
+      send: 'Yuborish',
+      noMessages: 'Hali xabarlar yo‘q',
+    },
     webglErrorFallback: 'Ushbu qurilmada 3D WebGL grafikasi ishga tushmadi.',
   },
   ru: {
@@ -713,6 +757,28 @@ export const TRANSLATIONS: Record<GameLang, TranslationBundle> = {
       twin_fjords: { name: 'Двойные фьорды', desc: 'Глубокие заливы и гранитные утёсы' },
       highland_meadows: { name: 'Горные луга', desc: 'Цветущие холмы и извилистая река' },
     },
+    multiplayer: {
+      buttonLabel: 'Онлайн',
+      title: 'Совместная игра онлайн',
+      connected: 'Подключено',
+      connecting: 'Подключение...',
+      reconnecting: 'Переподключение...',
+      disconnected: 'Отключено',
+      yourName: 'Ваше имя',
+      saveName: 'Сохранить',
+      roomCode: 'Код комнаты',
+      joinRoom: 'Войти',
+      copyInvite: 'Ссылка для друзей',
+      copied: 'Скопировано!',
+      playersInRoom: 'Игроки в комнате',
+      onlyYou: 'Пока в комнате только вы. Отправьте ссылку друзьям!',
+      youBadge: 'Вы',
+      goToPlayer: 'К игроку',
+      chatTitle: 'Чат комнаты',
+      chatPlaceholder: 'Написать сообщение...',
+      send: 'Отправить',
+      noMessages: 'Сообщений пока нет',
+    },
     webglErrorFallback: 'WebGL графика недоступна на этом устройстве.',
   },
   en: {
@@ -979,6 +1045,28 @@ export const TRANSLATIONS: Record<GameLang, TranslationBundle> = {
       crimson_caldera: { name: 'Volcanic Caldera', desc: 'Crater ring & central basalt spire' },
       twin_fjords: { name: 'Twin Fjords', desc: 'Deep coastal inlets & granite cliffs' },
       highland_meadows: { name: 'Highland Meadows', desc: 'Rolling wildflower hills & river' },
+    },
+    multiplayer: {
+      buttonLabel: 'Online',
+      title: 'Online Co-op World',
+      connected: 'Connected',
+      connecting: 'Connecting...',
+      reconnecting: 'Reconnecting...',
+      disconnected: 'Disconnected',
+      yourName: 'Explorer Name',
+      saveName: 'Save',
+      roomCode: 'Room Code',
+      joinRoom: 'Join',
+      copyInvite: 'Copy Invite Link',
+      copied: 'Copied!',
+      playersInRoom: 'Explorers in Room',
+      onlyYou: 'Only you are in this room right now. Share the invite link with friends!',
+      youBadge: 'You',
+      goToPlayer: 'Teleport',
+      chatTitle: 'Room Chat',
+      chatPlaceholder: 'Type a message...',
+      send: 'Send',
+      noMessages: 'No messages yet',
     },
     webglErrorFallback: 'WebGL context unavailable on this device.',
   },

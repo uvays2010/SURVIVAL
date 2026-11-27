@@ -14,6 +14,7 @@ import {
   Sliders,
   Sun,
   Swords,
+  Users,
   Volume2,
   VolumeX,
   Wind,
@@ -21,8 +22,17 @@ import {
 import { GameEntryOverlay } from './components/GameEntryOverlay';
 import { MapTransitionOverlay } from './components/MapTransitionOverlay';
 import { MobileTouchControls } from './components/MobileTouchControls';
+import { MultiplayerPanel } from './components/MultiplayerPanel';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { WorldMap } from './components/WorldMap';
+import {
+  ConnectionStatus,
+  getInitialPlayerName,
+  getInitialRoomFromUrl,
+  MultiplayerChatMessage,
+  MultiplayerClient,
+  RemotePlayerState,
+} from './game/multiplayer';
 import {
   GameLang,
   getInitialLanguage,
@@ -108,6 +118,14 @@ export default function App() {
   const [activeMapId, setActiveMapId] = useState<WorldMapId>('lost_valley');
   const [enteredWorld, setEnteredWorld] = useState(false);
   const [mapOpen, setMapOpen] = useState(false);
+  const [mpOpen, setMpOpen] = useState(false);
+  const [mpStatus, setMpStatus] = useState<ConnectionStatus>('connecting');
+  const [mpRoomId, setMpRoomId] = useState<string>(getInitialRoomFromUrl);
+  const [mpSelfId, setMpSelfId] = useState<string | null>(null);
+  const [mpName, setMpName] = useState<string>(getInitialPlayerName);
+  const [remotePlayers, setRemotePlayers] = useState<RemotePlayerState[]>([]);
+  const [mpMessages, setMpMessages] = useState<MultiplayerChatMessage[]>([]);
+  const mpClientRef = useRef<MultiplayerClient | null>(null);
   const [loadProgress, setLoadProgress] = useState<SurvivalLoadProgress>({
     percent: 4,
     stage: 'Preparing Expedition...',
@@ -157,13 +175,43 @@ export default function App() {
           setMapSwitchState((prev) => (prev ? { ...prev, progress: prog } : prev));
         }
       },
+      onLocalStateSync: (state) => {
+        mpClientRef.current?.pushLocalState(state);
+      },
       initialQuality: quality,
       initialSensitivity: lookSensitivity,
       initialMapId: activeMapId,
     });
     engineRef.current = engine;
 
+    const mpClient = new MultiplayerClient(mpRoomId, mpName, engine.getLocalNetState(), {
+      onStatusChange: (status, room, selfId) => {
+        setMpStatus(status);
+        setMpRoomId(room);
+        setMpSelfId(selfId);
+      },
+      onPlayersChange: (players) => {
+        setRemotePlayers(players);
+        engineRef.current?.setRemotePlayers(players);
+      },
+      onChatMessage: (msg) => {
+        setMpMessages((prev) => {
+          if (prev.some((item) => item.id === msg.id)) return prev;
+          return [...prev.slice(-49), msg];
+        });
+      },
+    });
+    mpClientRef.current = mpClient;
+
     const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') {
+        if (e.code === 'Escape') {
+          setMpOpen(false);
+          setMapOpen(false);
+        }
+        return;
+      }
       if (e.code === 'KeyH') {
         setDockOpen((prev) => !prev);
       } else if (e.code === 'KeyM') {
@@ -176,6 +224,7 @@ export default function App() {
         });
       } else if (e.code === 'Escape') {
         setMapOpen(false);
+        setMpOpen(false);
       }
     };
     const onFirstTouch = (e: PointerEvent) => {
@@ -205,6 +254,8 @@ export default function App() {
       if (mapSwitchHideTimerRef.current !== null) {
         window.clearTimeout(mapSwitchHideTimerRef.current);
       }
+      mpClient.dispose();
+      mpClientRef.current = null;
       engine.dispose();
       engineRef.current = null;
     };
@@ -388,6 +439,32 @@ export default function App() {
     }
   };
 
+  const handleOpenMultiplayer = () => {
+    if (document.pointerLockElement) {
+      document.exitPointerLock?.();
+    }
+    setMapOpen(false);
+    setMpOpen(true);
+  };
+
+  const handleMpNameChange = (nextName: string) => {
+    setMpName(nextName);
+    mpClientRef.current?.setPlayerName(nextName);
+  };
+
+  const handleMpJoinRoom = (nextRoom: string) => {
+    setMpMessages([]);
+    mpClientRef.current?.joinRoom(nextRoom);
+  };
+
+  const handleGoToPlayer = async (target: RemotePlayerState) => {
+    setMpOpen(false);
+    if (target.mapId !== activeMapId) {
+      await handleSwitchMap(target.mapId);
+    }
+    engineRef.current?.teleportToCoords(target.x + 2.2, target.z + 2.2);
+  };
+
   return (
     <div className="fixed inset-0 overflow-hidden bg-[#0b0e11]">
       <div
@@ -418,8 +495,6 @@ export default function App() {
         progress={loadProgress}
         quality={quality}
         onQualityChange={handleQualityChange}
-        selectedMapId={activeMapId}
-        onMapChange={handleSwitchMap}
         audioEnabledOnStart={audioOnStart}
         onToggleAudioOnStart={() => setAudioOnStart((prev) => !prev)}
         onEnterWorld={handleEnterWorld}
@@ -485,8 +560,24 @@ export default function App() {
         </div>
       </div>
 
-      {/* Top-Right Compact Landscape, Touch Pad & Audio Quick Toggles */}
+      {/* Top-Right Compact Online, Landscape, Touch Pad & Audio Quick Toggles */}
       <div className="absolute top-3 right-3 sm:top-4 sm:right-5 z-20 flex items-center gap-1.5">
+        <button
+          type="button"
+          onClick={handleOpenMultiplayer}
+          aria-label={t.multiplayer.buttonLabel}
+          className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+            mpOpen
+              ? 'bg-amber-500 text-stone-950 border-amber-300'
+              : 'bg-[#0d1117]/86 text-stone-200 border-white/15 hover:bg-[#171e28]'
+          }`}
+        >
+          <Users className="w-3.5 h-3.5 text-amber-400" />
+          <span className="hidden sm:inline">{t.multiplayer.buttonLabel}</span>
+          <span className="font-mono-num text-[11px] text-amber-300">
+            {remotePlayers.length + 1}
+          </span>
+        </button>
 
         {touchMode && (
           <button
@@ -569,12 +660,32 @@ export default function App() {
         biomeLabel={telemetry.biomeLabel}
         campfireLit={telemetry.campfireLit}
         lang={lang}
+        remotePlayers={remotePlayers}
         onTeleport={(id) => engineRef.current?.teleportToLandmark(id)}
         onSwitchMap={handleSwitchMap}
       />
 
+      {/* Online Multiplayer Co-op Room & Chat Panel */}
+      <MultiplayerPanel
+        visible={enteredWorld && !webglError}
+        isOpen={mpOpen}
+        onClose={() => setMpOpen(false)}
+        status={mpStatus}
+        roomId={mpRoomId}
+        selfId={mpSelfId}
+        playerName={mpName}
+        activeMapId={activeMapId}
+        remotePlayers={remotePlayers}
+        messages={mpMessages}
+        lang={lang}
+        onChangeName={handleMpNameChange}
+        onJoinRoom={handleMpJoinRoom}
+        onGoToPlayer={handleGoToPlayer}
+        onSendChat={(text) => mpClientRef.current?.sendChat(text)}
+      />
+
       {/* Mobile Touch Virtual Joystick & Action Pad */}
-      {touchMode && !dockOpen && !mapOpen && (
+      {touchMode && !dockOpen && !mapOpen && !mpOpen && (
         <MobileTouchControls
           flashlightOn={telemetry.flashlightOn}
           nearCampfire={telemetry.nearCampfire}

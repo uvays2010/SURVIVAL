@@ -9,6 +9,7 @@ import {
   waterDistanceInfo,
 } from '../game/noise';
 import { GameLang, TRANSLATIONS } from '../i18n';
+import { PLAYER_PALETTE, RemotePlayerState } from '../game/multiplayer';
 
 export type MapStyleMode = 'TOPO' | 'SATELLITE' | 'RADAR' | 'ELEVATION';
 
@@ -24,6 +25,7 @@ interface WorldMapProps {
   biomeLabel: string;
   campfireLit: boolean;
   lang: GameLang;
+  remotePlayers?: RemotePlayerState[];
   onTeleport: (landmarkId: string) => void;
   onSwitchMap: (mapId: WorldMapId) => void;
 }
@@ -269,6 +271,7 @@ export const WorldMap: React.FC<WorldMapProps> = ({
   biomeLabel,
   campfireLit,
   lang,
+  remotePlayers = [],
   onTeleport,
   onSwitchMap,
 }) => {
@@ -389,7 +392,35 @@ export const WorldMap: React.FC<WorldMapProps> = ({
     ctx.lineWidth = 1.6;
     ctx.stroke();
     ctx.restore();
-  }, [visible, bakedTerrain, activeMapDef, playerX, playerZ, headingDeg, campfireLit]);
+
+    // Remote teammates on the same map
+    for (const rp of remotePlayers) {
+      if (rp.mapId !== activeMapId) continue;
+      const dx = (rp.x - playerX) * pxPerMeter;
+      const dz = (rp.z - playerZ) * pxPerMeter;
+      const distPx = Math.hypot(dx, dz);
+      const maxR = half - 10;
+      const colorCss =
+        PLAYER_PALETTE[((rp.colorIdx % PLAYER_PALETTE.length) + PLAYER_PALETTE.length) % PLAYER_PALETTE.length];
+
+      if (distPx <= maxR) {
+        ctx.beginPath();
+        ctx.arc(half + dx, half + dz, 4.5, 0, Math.PI * 2);
+        ctx.fillStyle = colorCss;
+        ctx.fill();
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1.4;
+        ctx.stroke();
+      } else {
+        const edgeX = half + (dx / distPx) * (half - 6);
+        const edgeY = half + (dz / distPx) * (half - 6);
+        ctx.beginPath();
+        ctx.arc(edgeX, edgeY, 3.2, 0, Math.PI * 2);
+        ctx.fillStyle = colorCss;
+        ctx.fill();
+      }
+    }
+  }, [visible, bakedTerrain, activeMapDef, activeMapId, playerX, playerZ, headingDeg, campfireLit, remotePlayers]);
 
   // Draw Full World Atlas base terrain + player cone when Current Map tab is visible
   useEffect(() => {
@@ -435,7 +466,32 @@ export const WorldMap: React.FC<WorldMapProps> = ({
     ctx.lineWidth = 1.6;
     ctx.stroke();
     ctx.restore();
-  }, [isOpen, atlasTab, bakedTerrain, playerX, playerZ, headingDeg]);
+
+    // Draw remote teammates on Full Atlas canvas
+    for (const rp of remotePlayers) {
+      if (rp.mapId !== activeMapId) continue;
+      const pos = worldToNorm(rp.x, rp.z);
+      const rx = pos.nx * size;
+      const ry = pos.ny * size;
+      const colorCss =
+        PLAYER_PALETTE[((rp.colorIdx % PLAYER_PALETTE.length) + PLAYER_PALETTE.length) % PLAYER_PALETTE.length];
+
+      ctx.beginPath();
+      ctx.arc(rx, ry, 5.5, 0, Math.PI * 2);
+      ctx.fillStyle = colorCss;
+      ctx.fill();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+
+      ctx.font = '600 11px "Plus Jakarta Sans", system-ui, sans-serif';
+      ctx.fillStyle = '#ffffff';
+      ctx.strokeStyle = 'rgba(10,14,20,0.9)';
+      ctx.lineWidth = 3;
+      ctx.strokeText(rp.name, rx + 8, ry + 4);
+      ctx.fillText(rp.name, rx + 8, ry + 4);
+    }
+  }, [isOpen, atlasTab, bakedTerrain, activeMapId, playerX, playerZ, headingDeg, remotePlayers]);
 
   if (!visible) return null;
 

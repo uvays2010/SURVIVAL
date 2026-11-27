@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { Compass, Globe2, Play, Volume2, VolumeX } from 'lucide-react';
-import { QualityPreset, WORLD_MAPS, WorldMapId } from '../game/types';
+import { Compass, Play, Volume2, VolumeX } from 'lucide-react';
+import { QualityPreset } from '../game/types';
 import { SurvivalLoadProgress } from '../game/engine';
 import { GameLang, TRANSLATIONS } from '../i18n';
 import { PWAInstallButton } from './PWAInstallButton';
@@ -9,8 +9,6 @@ interface GameEntryOverlayProps {
   progress: SurvivalLoadProgress;
   quality: QualityPreset;
   onQualityChange: (q: QualityPreset) => void;
-  selectedMapId: WorldMapId;
-  onMapChange: (mapId: WorldMapId) => void;
   audioEnabledOnStart: boolean;
   onToggleAudioOnStart: () => void;
   onEnterWorld: () => void;
@@ -30,8 +28,6 @@ export const GameEntryOverlay: React.FC<GameEntryOverlayProps> = ({
   progress,
   quality,
   onQualityChange,
-  selectedMapId,
-  onMapChange,
   audioEnabledOnStart,
   onToggleAudioOnStart,
   onEnterWorld,
@@ -130,35 +126,8 @@ export const GameEntryOverlay: React.FC<GameEntryOverlayProps> = ({
           </div>
         </div>
 
-        {/* 8-Map Selector Strip */}
-        <div className="mt-3 sm:mt-4 flex flex-col gap-1.5 border-t border-white/10 pt-3">
-          <div className="flex items-center gap-1.5 text-xs text-stone-300">
-            <Globe2 className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-            <span>{t.map.chooseStartMap}</span>
-          </div>
-          <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
-            {WORLD_MAPS.map((m) => {
-              const active = m.id === selectedMapId;
-              return (
-                <button
-                  key={m.id}
-                  type="button"
-                  onClick={() => onMapChange(m.id)}
-                  className={`px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-                    active
-                      ? 'bg-amber-500 text-stone-950 border-amber-300 font-semibold'
-                      : 'bg-[#10161e]/90 text-stone-300 border-white/12 hover:text-white hover:border-white/30'
-                  }`}
-                >
-                  {t.worldMaps[m.id].name}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
         {/* Graphics Preset + Audio Row */}
-        <div className="mt-2.5 sm:mt-3.5 flex flex-wrap items-center justify-between gap-2.5 border-t border-white/10 pt-3">
+        <div className="mt-4 sm:mt-6 flex flex-wrap items-center justify-between gap-2.5 border-t border-white/10 pt-3.5">
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-xs text-stone-400 whitespace-nowrap">{t.graphicsLabel}</span>
             <div className="flex flex-wrap items-center gap-1 rounded-lg bg-[#10161e]/90 p-1 border border-white/10">

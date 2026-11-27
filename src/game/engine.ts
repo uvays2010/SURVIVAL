@@ -33,6 +33,8 @@ import { createCharacterSystem } from './character';
 import { createWildlifeSystem } from './wildlife';
 import { createWeatherAndVfxSystem } from './weatherAndVfx';
 import { createCombatSystem, CombatSystem } from './combat';
+import { NetLocalPlayerState, RemotePlayerState } from './multiplayer';
+import { RemotePlayersSystem } from './remotePlayers';
 
 // Custom HDR Filmic Grading + Crisp Unsharp Clarity + Subtle Vignette (Zero Blur)
 const CinematicGradeShader = {
@@ -121,6 +123,7 @@ export interface SurvivalEngineCallbacks {
   onWebglError: (msg: string) => void;
   onLoadProgress?: (progress: SurvivalLoadProgress) => void;
   onMapSwitchProgress?: (progress: SurvivalLoadProgress) => void;
+  onLocalStateSync?: (state: NetLocalPlayerState) => void;
   initialQuality?: QualityPreset;
   initialSensitivity?: number;
   initialMapId?: WorldMapId;
@@ -183,6 +186,8 @@ export class SurvivalEngine {
   private wildlife!: ReturnType<typeof createWildlifeSystem>;
   private weatherVfx!: ReturnType<typeof createWeatherAndVfxSystem>;
   private combat!: CombatSystem;
+  private remotePlayersSystem!: RemotePlayersSystem;
+  private remotePlayers: RemotePlayerState[] = [];
 
   // Input & Controls
   private keys = new Set<string>();
@@ -441,6 +446,7 @@ export class SurvivalEngine {
       this.world.crateAnchors,
       this.world.totemAnchors
     );
+    this.remotePlayersSystem = new RemotePlayersSystem(this.scene, textures);
 
     // Volumetric Sunset / Golden-Hour God-Ray Shaft Planes across the Valley
     this.sunShaftMat = new THREE.ShaderMaterial({
@@ -736,6 +742,10 @@ export class SurvivalEngine {
 
   private onKeyDown = (e: KeyboardEvent): void => {
     if (this.isSwitchingMap) return;
+    const target = e.target as HTMLElement | null;
+    if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+      return;
+    }
     const code = e.code;
     this.keys.add(code);
 
@@ -1105,12 +1115,62 @@ export class SurvivalEngine {
     const mapDef = getWorldMapDef(this.activeMapId);
     const lm = mapDef.landmarks.find((l) => l.id === id);
     if (!lm) return;
+    this.teleportToCoords(lm.x, lm.z, lm.yaw);
+  }
+
+  public teleportToCoords(x: number, z: number, yaw = this.camYaw): void {
+    if (!this.worldReady) return;
     this.introTimer = 0;
-    this.character.setPosition(lm.x, lm.z, lm.yaw);
-    this.camYaw = lm.yaw;
+    this.character.setPosition(x, z, yaw);
+    this.camYaw = yaw;
     this.camPitch = -0.14;
     const cfg = QUALITY_CONFIGS[this.quality];
-    this.world.updateGrass(lm.x, lm.z, cfg.grassRadius, cfg.grassCount);
+    this.world.updateGrass(x, z, cfg.grassRadius, cfg.grassCount);
+  }
+
+  public setRemotePlayers(players: RemotePlayerState[]): void {
+    this.remotePlayers = players;
+  }
+
+  public getLocalNetState(): NetLocalPlayerState {
+    if (!this.worldReady || !this.character) {
+      const def = getWorldMapDef(this.activeMapId);
+      return {
+        mapId: this.activeMapId,
+        x: def.spawn.x,
+        y: 3.2,
+        z: def.spawn.z,
+        yaw: def.spawn.yaw,
+        speed: 0,
+        crouch: false,
+        sprint: false,
+        swim: false,
+        flashlight: false,
+        attackCombo: 0,
+        attackTimer: 0,
+        heavy: false,
+        dodge: false,
+        guard: false,
+      };
+    }
+    const s = this.character.state;
+    return {
+      mapId: this.activeMapId,
+      x: s.position.x,
+      y: s.position.y,
+      z: s.position.z,
+      yaw: s.yaw,
+      speed: s.moveSpeed,
+      crouch: s.isCrouching,
+      sprint: s.isSprinting,
+      swim: s.isSwimming,
+      flashlight: s.flashlightOn,
+      attackCombo: s.attackCombo,
+      attackTimer: s.attackTimer,
+      heavy: s.isHeavyAttack,
+      dodge: s.dodgeTimer > 0,
+      guard: s.isGuarding,
+    };
   }
 
   private queryWalkableHeight = (x: number, z: number): number => {
@@ -1501,11 +1561,11 @@ export class SurvivalEngine {
 
     // Survival vitals dynamics
     if (this.character.state.isSwimming && this.character.state.isSprinting && this.character.state.moveSpeed > 2.0) {
-      this.stamina = Math.max(0, this.stamina - simDt * 8.5);
+      this.stamina = Math.max(0, this.stamina - simDt * 3.0);
     } else if (this.character.state.isSprinting && this.character.state.moveSpeed > 5.5) {
-      this.stamina = Math.max(0, this.stamina - simDt * 14);
+      this.stamina = Math.max(0, this.stamina - simDt * 3.5);
     } else {
-      this.stamina = Math.min(100, this.stamina + simDt * (this.character.state.isSwimming ? 7.5 : 11));
+      this.stamina = Math.min(100, this.stamina + simDt * (this.character.state.isSwimming ? 8.5 : 12.5));
     }
 
     const nearCamp = this.character.state.position.distanceTo(this.world.campfirePos) < 6.5;
@@ -1551,6 +1611,12 @@ export class SurvivalEngine {
       nightFactor,
       this.weatherVfx.weather.rainIntensity
     );
+
+    // Update Remote Online Teammates in 3D World
+    this.remotePlayersSystem.update(simDt, this.elapsed, this.activeMapId, this.remotePlayers);
+
+    // Emit local state delta for online sync
+    this.callbacks.onLocalStateSync?.(this.getLocalNetState());
 
     // Sync shared shader uniforms
     this.envUniforms.uTime.value = this.elapsed;
@@ -1667,6 +1733,7 @@ export class SurvivalEngine {
       this.combat?.dispose();
       this.hasActiveWorldEntities = false;
     }
+    this.remotePlayersSystem?.dispose();
     this.weatherVfx?.dispose();
     this.dynamicEnvRT?.dispose();
     this.cubeRenderTarget?.dispose();
