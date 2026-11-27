@@ -242,6 +242,7 @@ export class MultiplayerClient {
   private cloudPlayerDocCreated = false;
   private cloudJoinSeq = 0;
   private cloudWriteInFlight = false;
+  private serverTimeOffsetMs = 0;
 
   private roomId: string;
   private playerName: string;
@@ -511,7 +512,17 @@ export class MultiplayerClient {
       playersQ,
       (snapshot) => {
         if (this.disposed || seq !== this.cloudJoinSeq) return;
-        const now = Date.now();
+        const localNow = Date.now();
+        snapshot.forEach((docSnap) => {
+          if (docSnap.id === this.cloudSessionId) {
+            const selfData = docSnap.data() as Record<string, unknown>;
+            const selfTs = selfData.updatedAt as Timestamp | null | undefined;
+            if (selfTs && typeof selfTs.toMillis === 'function' && !docSnap.metadata.hasPendingWrites) {
+              this.serverTimeOffsetMs = selfTs.toMillis() - localNow;
+            }
+          }
+        });
+        const now = localNow + this.serverTimeOffsetMs;
         const prevIds = new Set(this.players.keys());
         const nextIds = new Set<string>();
         let structureChanged = false;
@@ -523,7 +534,7 @@ export class MultiplayerClient {
           const tsObj = d.updatedAt as Timestamp | null | undefined;
           const updatedMs =
             tsObj && typeof tsObj.toMillis === 'function' ? tsObj.toMillis() : now;
-          if (now - updatedMs > 30000) return;
+          if (now - updatedMs > 60000) return;
 
           const rp: RemotePlayerState = {
             id: typeof d.id === 'string' ? d.id : docSnap.id,
@@ -612,10 +623,10 @@ export class MultiplayerClient {
     }, 5000);
 
     this.cloudPruneTimer = window.setInterval(() => {
-      const now = Date.now();
+      const now = Date.now() + this.serverTimeOffsetMs;
       let changed = false;
       for (const [id, rp] of this.players.entries()) {
-        if (now - rp.lastUpdated > 30000) {
+        if (now - rp.lastUpdated > 60000) {
           this.players.delete(id);
           changed = true;
         }

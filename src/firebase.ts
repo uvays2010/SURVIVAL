@@ -1,9 +1,11 @@
 import { initializeApp } from 'firebase/app';
 import {
   getAuth,
+  getRedirectResult,
   GoogleAuthProvider,
   onAuthStateChanged,
   signInWithPopup,
+  signInWithRedirect,
   signOut,
   type User,
 } from 'firebase/auth';
@@ -79,11 +81,25 @@ export async function testConnection(): Promise<void> {
 }
 
 void testConnection();
+void getRedirectResult(auth).catch(() => {});
 
-export async function signInWithGoogle(): Promise<User> {
+export async function signInWithGoogle(): Promise<User | null> {
   googleProvider.setCustomParameters({ prompt: 'select_account' });
-  const cred = await signInWithPopup(auth, googleProvider);
-  return cred.user;
+  try {
+    const cred = await signInWithPopup(auth, googleProvider);
+    return cred.user;
+  } catch (err) {
+    const code =
+      typeof err === 'object' && err !== null && 'code' in err
+        ? String((err as { code?: unknown }).code ?? '')
+        : '';
+    const isTopLevel = typeof window !== 'undefined' && window.self === window.top;
+    if (code === 'auth/popup-blocked' && isTopLevel) {
+      await signInWithRedirect(auth, googleProvider);
+      return null;
+    }
+    throw err;
+  }
 }
 
 export async function signOutFirebase(): Promise<void> {
