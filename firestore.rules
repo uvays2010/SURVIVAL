@@ -1,0 +1,231 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 1 / Safety Net: Default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidRoomId(id) {
+      return id is string && id.size() >= 2 && id.size() <= 20 && id.matches('^[a-z0-9_\\-]+$');
+    }
+
+    function isValidSessionId(id) {
+      return id is string && id.size() >= 4 && id.size() <= 64 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidMapId(mapId) {
+      return mapId in [
+        'lost_valley',
+        'alpine_glacier',
+        'emerald_archipelago',
+        'saffron_canyon',
+        'misty_wetlands',
+        'crimson_caldera',
+        'twin_fjords',
+        'highland_meadows'
+      ];
+    }
+
+    function isFiniteInRange(val, minVal, maxVal) {
+      return val is number && val >= minVal && val <= maxVal;
+    }
+
+    function isValidRoom(data, roomId) {
+      return data.keys().hasAll(['roomId', 'createdBy', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['roomId', 'createdBy', 'createdAt', 'updatedAt'])
+        && data.roomId == roomId
+        && isValidRoomId(data.roomId)
+        && data.createdBy is string
+        && data.createdBy.size() >= 1
+        && data.createdBy.size() <= 128
+        && data.createdBy.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp
+        && data.updatedAt == request.time;
+    }
+
+    function isValidRoomPlayer(data, roomId, playerId) {
+      return data.keys().hasAll([
+          'id', 'ownerUid', 'roomId', 'name', 'colorIdx', 'mapId',
+          'x', 'y', 'z', 'yaw', 'speed',
+          'crouch', 'sprint', 'swim', 'flashlight',
+          'attackCombo', 'attackTimer', 'heavy', 'dodge', 'guard',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerUid', 'roomId', 'name', 'colorIdx', 'mapId',
+          'x', 'y', 'z', 'yaw', 'speed',
+          'crouch', 'sprint', 'swim', 'flashlight',
+          'attackCombo', 'attackTimer', 'heavy', 'dodge', 'guard',
+          'updatedAt'
+        ])
+        && data.id == playerId
+        && isValidSessionId(data.id)
+        && data.ownerUid is string
+        && data.ownerUid.size() >= 1
+        && data.ownerUid.size() <= 128
+        && data.ownerUid.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.roomId == roomId
+        && isValidRoomId(data.roomId)
+        && data.name is string
+        && data.name.size() >= 1
+        && data.name.size() <= 18
+        && isFiniteInRange(data.colorIdx, 0, 7)
+        && data.mapId is string
+        && isValidMapId(data.mapId)
+        && isFiniteInRange(data.x, -500, 500)
+        && isFiniteInRange(data.y, -100, 500)
+        && isFiniteInRange(data.z, -500, 500)
+        && isFiniteInRange(data.yaw, -100, 100)
+        && isFiniteInRange(data.speed, 0, 40)
+        && data.crouch is bool
+        && data.sprint is bool
+        && data.swim is bool
+        && data.flashlight is bool
+        && isFiniteInRange(data.attackCombo, 0, 5)
+        && isFiniteInRange(data.attackTimer, 0, 5)
+        && data.heavy is bool
+        && data.dodge is bool
+        && data.guard is bool
+        && data.updatedAt is timestamp
+        && data.updatedAt == request.time;
+    }
+
+    function isValidRoomMessage(data, roomId, messageId) {
+      return data.keys().hasAll([
+          'id', 'ownerUid', 'playerId', 'roomId', 'name', 'colorIdx', 'text', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerUid', 'playerId', 'roomId', 'name', 'colorIdx', 'text', 'createdAt'
+        ])
+        && data.id == messageId
+        && isValidSessionId(data.id)
+        && data.ownerUid is string
+        && data.ownerUid.size() >= 1
+        && data.ownerUid.size() <= 128
+        && data.ownerUid.matches('^[a-zA-Z0-9_\\-]+$')
+        && isValidSessionId(data.playerId)
+        && data.roomId == roomId
+        && isValidRoomId(data.roomId)
+        && data.name is string
+        && data.name.size() >= 1
+        && data.name.size() <= 18
+        && isFiniteInRange(data.colorIdx, 0, 7)
+        && data.text is string
+        && data.text.size() >= 1
+        && data.text.size() <= 140
+        && data.createdAt is timestamp
+        && data.createdAt == request.time;
+    }
+
+    // Connection probe document
+    match /test/connection {
+      allow get: if isVerifiedUser();
+    }
+
+    // Shared multiplayer rooms (direct get by exact roomId, no collection list scraping)
+    match /rooms/{roomId} {
+      allow get: if isVerifiedUser() && isValidRoomId(roomId);
+      allow list: if false;
+
+      allow create: if isVerifiedUser()
+        && isValidRoomId(roomId)
+        && isValidRoom(incoming(), roomId)
+        && incoming().createdBy == request.auth.uid
+        && incoming().createdAt == request.time;
+
+      allow update: if isVerifiedUser()
+        && isValidRoomId(roomId)
+        && isValidRoom(incoming(), roomId)
+        && existing().createdBy == request.auth.uid
+        && incoming().roomId == existing().roomId
+        && incoming().createdBy == existing().createdBy
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['updatedAt']);
+
+      allow delete: if false;
+
+      // Active player avatars inside the room
+      match /players/{playerId} {
+        allow get: if isVerifiedUser()
+          && isValidRoomId(roomId)
+          && isValidSessionId(playerId)
+          && existing().roomId == roomId;
+
+        allow list: if isVerifiedUser()
+          && resource.data.roomId == roomId;
+
+        allow create: if isVerifiedUser()
+          && isValidRoomId(roomId)
+          && isValidSessionId(playerId)
+          && isValidRoomPlayer(incoming(), roomId, playerId)
+          && incoming().ownerUid == request.auth.uid
+          && exists(/databases/$(database)/documents/rooms/$(roomId));
+
+        allow update: if isVerifiedUser()
+          && isValidRoomId(roomId)
+          && isValidSessionId(playerId)
+          && isValidRoomPlayer(incoming(), roomId, playerId)
+          && existing().ownerUid == request.auth.uid
+          && incoming().ownerUid == existing().ownerUid
+          && incoming().id == existing().id
+          && incoming().roomId == existing().roomId
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'name', 'colorIdx', 'mapId',
+            'x', 'y', 'z', 'yaw', 'speed',
+            'crouch', 'sprint', 'swim', 'flashlight',
+            'attackCombo', 'attackTimer', 'heavy', 'dodge', 'guard',
+            'updatedAt'
+          ]);
+
+        allow delete: if isVerifiedUser()
+          && isValidRoomId(roomId)
+          && isValidSessionId(playerId)
+          && existing().ownerUid == request.auth.uid;
+      }
+
+      // Co-op room chat messages
+      match /messages/{messageId} {
+        allow get: if isVerifiedUser()
+          && isValidRoomId(roomId)
+          && isValidSessionId(messageId)
+          && existing().roomId == roomId;
+
+        allow list: if isVerifiedUser()
+          && resource.data.roomId == roomId;
+
+        allow create: if isVerifiedUser()
+          && isValidRoomId(roomId)
+          && isValidSessionId(messageId)
+          && isValidRoomMessage(incoming(), roomId, messageId)
+          && incoming().ownerUid == request.auth.uid
+          && exists(/databases/$(database)/documents/rooms/$(roomId));
+
+        allow update: if false;
+
+        allow delete: if isVerifiedUser()
+          && isValidRoomId(roomId)
+          && isValidSessionId(messageId)
+          && existing().ownerUid == request.auth.uid;
+      }
+    }
+  }
+}

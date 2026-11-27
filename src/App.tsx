@@ -32,6 +32,7 @@ import {
   MultiplayerChatMessage,
   MultiplayerClient,
   RemotePlayerState,
+  SyncTransport,
 } from './game/multiplayer';
 import {
   GameLang,
@@ -120,11 +121,14 @@ export default function App() {
   const [mapOpen, setMapOpen] = useState(false);
   const [mpOpen, setMpOpen] = useState(false);
   const [mpStatus, setMpStatus] = useState<ConnectionStatus>('connecting');
+  const [mpTransport, setMpTransport] = useState<SyncTransport>('local');
+  const [mpAuthUser, setMpAuthUser] = useState<{ uid: string; displayName: string | null } | null>(null);
   const [mpRoomId, setMpRoomId] = useState<string>(getInitialRoomFromUrl);
   const [mpSelfId, setMpSelfId] = useState<string | null>(null);
   const [mpName, setMpName] = useState<string>(getInitialPlayerName);
   const [remotePlayers, setRemotePlayers] = useState<RemotePlayerState[]>([]);
   const [mpMessages, setMpMessages] = useState<MultiplayerChatMessage[]>([]);
+  const [firestoreFatalErr, setFirestoreFatalErr] = useState<Error | null>(null);
   const mpClientRef = useRef<MultiplayerClient | null>(null);
   const [loadProgress, setLoadProgress] = useState<SurvivalLoadProgress>({
     percent: 4,
@@ -185,10 +189,20 @@ export default function App() {
     engineRef.current = engine;
 
     const mpClient = new MultiplayerClient(mpRoomId, mpName, engine.getLocalNetState(), {
-      onStatusChange: (status, room, selfId) => {
+      onStatusChange: (status, room, selfId, transport) => {
         setMpStatus(status);
         setMpRoomId(room);
         setMpSelfId(selfId);
+        setMpTransport(transport);
+      },
+      onAuthChange: (user) => {
+        setMpAuthUser(user);
+        if (user?.displayName) {
+          setMpName((prev) => {
+            if (!prev.startsWith('Sayohatchi-')) return prev;
+            return user.displayName!.trim().slice(0, 18) || prev;
+          });
+        }
       },
       onPlayersFrame: (players) => {
         engineRef.current?.setRemotePlayers(players);
@@ -196,11 +210,17 @@ export default function App() {
       onPlayersChange: (players) => {
         setRemotePlayers(players);
       },
+      onChatMessagesReplace: (messages) => {
+        setMpMessages(messages);
+      },
       onChatMessage: (msg) => {
         setMpMessages((prev) => {
           if (prev.some((item) => item.id === msg.id)) return prev;
           return [...prev.slice(-49), msg];
         });
+      },
+      onFirestoreError: (err) => {
+        setFirestoreFatalErr(err);
       },
     });
     mpClientRef.current = mpClient;
@@ -467,6 +487,10 @@ export default function App() {
     engineRef.current?.teleportToCoords(target.x + 2.2, target.z + 2.2);
   };
 
+  if (firestoreFatalErr) {
+    throw firestoreFatalErr;
+  }
+
   return (
     <div className="fixed inset-0 overflow-hidden bg-[#0b0e11]">
       <div
@@ -673,6 +697,8 @@ export default function App() {
         isOpen={mpOpen}
         onClose={() => setMpOpen(false)}
         status={mpStatus}
+        transport={mpTransport}
+        authUser={mpAuthUser}
         roomId={mpRoomId}
         selfId={mpSelfId}
         playerName={mpName}
@@ -684,6 +710,12 @@ export default function App() {
         onJoinRoom={handleMpJoinRoom}
         onGoToPlayer={handleGoToPlayer}
         onSendChat={(text) => mpClientRef.current?.sendChat(text)}
+        onSignInCloud={async () => {
+          await mpClientRef.current?.signInCloud();
+        }}
+        onSignOutCloud={async () => {
+          await mpClientRef.current?.signOutCloud();
+        }}
       />
 
       {/* Mobile Touch Virtual Joystick & Action Pad */}

@@ -1,11 +1,24 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Check, Copy, MapPin, Send, Users, Wifi, WifiOff, X } from 'lucide-react';
+import {
+  Check,
+  Cloud,
+  Copy,
+  LogIn,
+  LogOut,
+  MapPin,
+  Send,
+  Users,
+  Wifi,
+  WifiOff,
+  X,
+} from 'lucide-react';
 import {
   buildShareableRoomUrl,
   ConnectionStatus,
   MultiplayerChatMessage,
   PLAYER_PALETTE,
   RemotePlayerState,
+  SyncTransport,
 } from '../game/multiplayer';
 import { WorldMapId } from '../game/types';
 import { GameLang, TRANSLATIONS } from '../i18n';
@@ -15,6 +28,8 @@ interface MultiplayerPanelProps {
   isOpen: boolean;
   onClose: () => void;
   status: ConnectionStatus;
+  transport: SyncTransport;
+  authUser: { uid: string; displayName: string | null } | null;
   roomId: string;
   selfId: string | null;
   playerName: string;
@@ -26,6 +41,8 @@ interface MultiplayerPanelProps {
   onJoinRoom: (roomId: string) => void;
   onGoToPlayer: (player: RemotePlayerState) => void;
   onSendChat: (text: string) => void;
+  onSignInCloud: () => Promise<void>;
+  onSignOutCloud: () => Promise<void>;
 }
 
 export const MultiplayerPanel: React.FC<MultiplayerPanelProps> = ({
@@ -33,6 +50,8 @@ export const MultiplayerPanel: React.FC<MultiplayerPanelProps> = ({
   isOpen,
   onClose,
   status,
+  transport,
+  authUser,
   roomId,
   playerName,
   activeMapId,
@@ -43,6 +62,8 @@ export const MultiplayerPanel: React.FC<MultiplayerPanelProps> = ({
   onJoinRoom,
   onGoToPlayer,
   onSendChat,
+  onSignInCloud,
+  onSignOutCloud,
 }) => {
   const t = TRANSLATIONS[lang];
   const [nameInput, setNameInput] = useState(playerName);
@@ -50,6 +71,8 @@ export const MultiplayerPanel: React.FC<MultiplayerPanelProps> = ({
   const [chatInput, setChatInput] = useState('');
   const [copied, setCopied] = useState(false);
   const [showInviteUrl, setShowInviteUrl] = useState(false);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
   const shareUrl = buildShareableRoomUrl(roomId);
 
@@ -89,6 +112,27 @@ export const MultiplayerPanel: React.FC<MultiplayerPanelProps> = ({
     }
   };
 
+  const handleGoogleSignIn = async () => {
+    setAuthError(null);
+    setAuthBusy(true);
+    try {
+      await onSignInCloud();
+    } catch {
+      setAuthError(t.multiplayer.authError);
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleGoogleSignOut = async () => {
+    setAuthBusy(true);
+    try {
+      await onSignOutCloud();
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
   const handleNameSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (nameInput.trim()) {
@@ -124,8 +168,8 @@ export const MultiplayerPanel: React.FC<MultiplayerPanelProps> = ({
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-white/10 bg-[#111720]">
-          <div className="flex items-center gap-2.5 min-w-0">
+        <div className="flex items-center justify-between gap-2 px-4 py-3 border-b border-white/10 bg-[#111720]">
+          <div className="flex items-center gap-2 min-w-0 flex-wrap">
             <Users className="w-4 h-4 text-amber-400 shrink-0" />
             <h2 className="font-display text-sm sm:text-base font-semibold tracking-wide truncate">
               {t.multiplayer.title}
@@ -143,20 +187,70 @@ export const MultiplayerPanel: React.FC<MultiplayerPanelProps> = ({
               )}
               <span>{statusText}</span>
             </span>
+            <span
+              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium whitespace-nowrap ${
+                transport === 'cloud'
+                  ? 'bg-emerald-500/18 text-emerald-300 border border-emerald-400/30'
+                  : 'bg-white/8 text-stone-300 border border-white/12'
+              }`}
+            >
+              <Cloud className="w-3 h-3 shrink-0" />
+              <span>{transport === 'cloud' ? t.multiplayer.cloudConnected : t.multiplayer.localMode}</span>
+            </span>
           </div>
 
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label={t.map.closeMap}
-            className="p-1.5 rounded-lg bg-[#1a222d] text-stone-300 hover:text-white hover:bg-[#243040] transition-colors cursor-pointer shrink-0"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {authUser && (
+              <button
+                type="button"
+                disabled={authBusy}
+                onClick={handleGoogleSignOut}
+                title={t.multiplayer.signOut}
+                className="flex items-center gap-1 px-2 py-1 rounded-lg bg-[#1a222d] hover:bg-[#243040] text-[11px] text-stone-300 hover:text-white transition-colors cursor-pointer disabled:opacity-50"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">{t.multiplayer.signOut}</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label={t.map.closeMap}
+              className="p-1.5 rounded-lg bg-[#1a222d] text-stone-300 hover:text-white hover:bg-[#243040] transition-colors cursor-pointer shrink-0"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
         {/* Body */}
         <div className="p-4 flex flex-col gap-4">
+          {/* Cloud Sync / Google Sign-In Callout when not signed into Firebase yet */}
+          {!authUser && (
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-lg bg-amber-500/12 border border-amber-400/35 p-3">
+              <div className="flex flex-col gap-0.5 min-w-0">
+                <span className="text-xs sm:text-sm font-semibold text-amber-300">
+                  {t.multiplayer.cloudBannerTitle}
+                </span>
+                <span className="text-[11px] sm:text-xs text-stone-300 leading-snug">
+                  {t.multiplayer.cloudBannerDesc}
+                </span>
+                {authError && (
+                  <span className="text-[11px] text-rose-300 mt-1">{authError}</span>
+                )}
+              </div>
+              <button
+                type="button"
+                disabled={authBusy}
+                onClick={handleGoogleSignIn}
+                className="flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-xs font-semibold text-stone-950 transition-colors cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-60"
+              >
+                <LogIn className="w-3.5 h-3.5" />
+                <span>{t.multiplayer.connectGoogle}</span>
+              </button>
+            </div>
+          )}
+
           {/* Identity & Room Controls */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <form onSubmit={handleNameSubmit} className="flex flex-col gap-1.5">

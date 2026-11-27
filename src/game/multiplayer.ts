@@ -1,3 +1,27 @@
+import {
+  collection,
+  deleteDoc,
+  doc,
+  getDoc,
+  onSnapshot,
+  query,
+  serverTimestamp,
+  setDoc,
+  Timestamp,
+  updateDoc,
+  where,
+  type Unsubscribe,
+} from 'firebase/firestore';
+import {
+  auth,
+  db,
+  handleFirestoreError,
+  onAuthStateChanged,
+  OperationType,
+  signInWithGoogle,
+  signOutFirebase,
+  type User,
+} from '../firebase';
 import { WorldMapId } from './types';
 
 export interface RemotePlayerState {
@@ -51,6 +75,7 @@ export interface MultiplayerChatMessage {
 }
 
 export type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
+export type SyncTransport = 'cloud' | 'local';
 
 export const PLAYER_PALETTE = [
   '#f59e0b', // Amber
@@ -74,15 +99,82 @@ export const PLAYER_PALETTE_HEX = [
   0x2dd4bf,
 ] as const;
 
+const VALID_WORLD_MAP_IDS: ReadonlySet<WorldMapId> = new Set<WorldMapId>([
+  'lost_valley',
+  'alpine_glacier',
+  'emerald_archipelago',
+  'saffron_canyon',
+  'misty_wetlands',
+  'crimson_caldera',
+  'twin_fjords',
+  'highland_meadows',
+]);
+
 export const MP_NAME_STORAGE_KEY = 'lost_world_mp_name';
+const MP_SESSION_STORAGE_KEY = 'lost_world_mp_session_id';
+
+function clampNum(v: number, min: number, max: number): number {
+  if (!Number.isFinite(v)) return min;
+  return Math.min(max, Math.max(min, v));
+}
+
+function round2(v: number): number {
+  return Math.round(v * 100) / 100;
+}
+
+function normalizeYaw(yaw: number): number {
+  if (!Number.isFinite(yaw)) return 0;
+  let y = yaw % (Math.PI * 2);
+  if (y > Math.PI) y -= Math.PI * 2;
+  if (y < -Math.PI) y += Math.PI * 2;
+  return round2(clampNum(y, -10, 10));
+}
+
+function sanitizeRoomId(raw: string): string {
+  const cleaned = raw.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 20);
+  return cleaned.length >= 2 ? cleaned : 'global';
+}
+
+function sanitizePlayerName(raw: string): string {
+  const cleaned = raw.trim().slice(0, 18);
+  return cleaned.length >= 1 ? cleaned : 'Sayohatchi';
+}
+
+function sanitizeMapId(mapId: WorldMapId): WorldMapId {
+  return VALID_WORLD_MAP_IDS.has(mapId) ? mapId : 'lost_valley';
+}
+
+function getOrCreateSessionId(): string {
+  if (typeof window !== 'undefined') {
+    try {
+      const existing = window.sessionStorage.getItem(MP_SESSION_STORAGE_KEY);
+      if (existing && /^[a-zA-Z0-9_-]{8,48}$/.test(existing)) {
+        return existing;
+      }
+      const next = `p_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
+      window.sessionStorage.setItem(MP_SESSION_STORAGE_KEY, next);
+      return next;
+    } catch {
+      // Ignore sessionStorage restrictions
+    }
+  }
+  return `p_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
+}
+
+function hashColorIdx(id: string): number {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) {
+    h = (h * 31 + id.charCodeAt(i)) | 0;
+  }
+  return Math.abs(h) % PLAYER_PALETTE.length;
+}
 
 export function getInitialRoomFromUrl(): string {
   if (typeof window === 'undefined') return 'global';
   try {
     const params = new URLSearchParams(window.location.search);
     const raw = params.get('room') || '';
-    const cleaned = raw.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 20);
-    return cleaned.length >= 2 ? cleaned : 'global';
+    return sanitizeRoomId(raw);
   } catch {
     return 'global';
   }
@@ -109,26 +201,47 @@ export function buildShareableRoomUrl(roomId: string): string {
   if (url.hostname.startsWith('ais-dev-')) {
     url.hostname = url.hostname.replace(/^ais-dev-/, 'ais-pre-');
   }
-  url.searchParams.set('room', roomId);
+  url.searchParams.set('room', sanitizeRoomId(roomId));
   return url.toString();
 }
 
 export interface MultiplayerCallbacks {
-  onStatusChange: (status: ConnectionStatus, roomId: string, selfId: string | null) => void;
+  onStatusChange: (
+    status: ConnectionStatus,
+    roomId: string,
+    selfId: string | null,
+    transport: SyncTransport
+  ) => void;
+  onAuthChange?: (user: { uid: string; displayName: string | null } | null) => void;
   onPlayersFrame?: (players: RemotePlayerState[]) => void;
   onPlayersChange: (players: RemotePlayerState[]) => void;
+  onChatMessagesReplace?: (messages: MultiplayerChatMessage[]) => void;
   onChatMessage: (msg: MultiplayerChatMessage) => void;
+  onFirestoreError?: (err: Error) => void;
 }
 
 export class MultiplayerClient {
   private ws: WebSocket | null = null;
   private disposed = false;
-  private mode: 'ws' | 'http' = 'ws';
+  private mode: 'cloud' | 'ws' | 'http' = 'ws';
   private wsConnectTimeout: number | null = null;
   private reconnectTimer: number | null = null;
   private httpSyncTimer: number | null = null;
   private httpSyncInFlight = false;
   private reconnectAttempt = 0;
+
+  // Firebase Auth & Firestore state
+  private authUnsub: Unsubscribe | null = null;
+  private playersUnsub: Unsubscribe | null = null;
+  private messagesUnsub: Unsubscribe | null = null;
+  private cloudHeartbeatTimer: number | null = null;
+  private cloudPruneTimer: number | null = null;
+  private currentUser: User | null = null;
+  private cloudSessionId: string;
+  private cloudColorIdx: number;
+  private cloudPlayerDocCreated = false;
+  private cloudJoinSeq = 0;
+  private cloudWriteInFlight = false;
 
   private roomId: string;
   private playerName: string;
@@ -147,18 +260,63 @@ export class MultiplayerClient {
     initialState: NetLocalPlayerState,
     callbacks: MultiplayerCallbacks
   ) {
-    this.roomId = initialRoomId;
-    this.playerName = initialName;
+    this.roomId = sanitizeRoomId(initialRoomId);
+    this.playerName = sanitizePlayerName(initialName);
     this.latestLocalState = { ...initialState };
     this.callbacks = callbacks;
+    this.cloudSessionId = getOrCreateSessionId();
+    this.cloudColorIdx = hashColorIdx(this.cloudSessionId);
 
     if (typeof window !== 'undefined') {
       window.addEventListener('pagehide', this.handlePageHide);
     }
-    this.connectWebSocket();
+
+    // Monitor Firebase Auth; verified users sync globally across PC, Phone & PWA via Firestore
+    this.authUnsub = onAuthStateChanged(auth, (user) => {
+      if (this.disposed) return;
+      const verified = user && user.emailVerified ? user : null;
+      this.currentUser = verified;
+      this.callbacks.onAuthChange?.(
+        verified ? { uid: verified.uid, displayName: verified.displayName } : null
+      );
+
+      if (verified) {
+        // Apply Google displayName automatically if player still has the auto-generated placeholder name
+        if (verified.displayName) {
+          try {
+            const savedCustom = localStorage.getItem(MP_NAME_STORAGE_KEY);
+            if (!savedCustom && this.playerName.startsWith('Sayohatchi-')) {
+              this.playerName = sanitizePlayerName(verified.displayName);
+            }
+          } catch {
+            // Ignore storage errors
+          }
+        }
+        void this.activateCloudFirestore();
+      } else {
+        this.teardownCloud();
+        this.connectWebSocket();
+      }
+    });
+  }
+
+  public async signInCloud(): Promise<void> {
+    await signInWithGoogle();
+  }
+
+  public async signOutCloud(): Promise<void> {
+    if (this.mode === 'cloud') {
+      await this.deleteOwnCloudPlayerDoc(this.roomId);
+    }
+    this.teardownCloud();
+    await signOutFirebase();
   }
 
   private handlePageHide = (): void => {
+    if (this.mode === 'cloud' && this.currentUser && this.cloudPlayerDocCreated) {
+      void deleteDoc(doc(db, 'rooms', this.roomId, 'players', this.cloudSessionId)).catch(() => {});
+      return;
+    }
     if (this.mode === 'http' && this.selfId && navigator.sendBeacon) {
       try {
         navigator.sendBeacon(
@@ -170,6 +328,354 @@ export class MultiplayerClient {
       }
     }
   };
+
+  private teardownLocalSockets(): void {
+    this.clearWsTimers();
+    this.clearHttpTimer();
+    if (this.ws) {
+      this.ws.onopen = null;
+      this.ws.onmessage = null;
+      this.ws.onclose = null;
+      this.ws.onerror = null;
+      try {
+        this.ws.close();
+      } catch {
+        // Ignore close errors
+      }
+      this.ws = null;
+    }
+  }
+
+  private teardownCloud(): void {
+    this.cloudJoinSeq++;
+    this.cloudPlayerDocCreated = false;
+    if (this.playersUnsub) {
+      this.playersUnsub();
+      this.playersUnsub = null;
+    }
+    if (this.messagesUnsub) {
+      this.messagesUnsub();
+      this.messagesUnsub = null;
+    }
+    if (this.cloudHeartbeatTimer !== null) {
+      window.clearInterval(this.cloudHeartbeatTimer);
+      this.cloudHeartbeatTimer = null;
+    }
+    if (this.cloudPruneTimer !== null) {
+      window.clearInterval(this.cloudPruneTimer);
+      this.cloudPruneTimer = null;
+    }
+  }
+
+  private buildCloudPlayerPayload(user: User) {
+    const s = this.latestLocalState;
+    return {
+      id: this.cloudSessionId,
+      ownerUid: user.uid,
+      roomId: this.roomId,
+      name: sanitizePlayerName(this.playerName),
+      colorIdx: this.cloudColorIdx,
+      mapId: sanitizeMapId(s.mapId),
+      x: round2(clampNum(s.x, -499, 499)),
+      y: round2(clampNum(s.y, -99, 499)),
+      z: round2(clampNum(s.z, -499, 499)),
+      yaw: normalizeYaw(s.yaw),
+      speed: round2(clampNum(s.speed, 0, 39)),
+      crouch: Boolean(s.crouch),
+      sprint: Boolean(s.sprint),
+      swim: Boolean(s.swim),
+      flashlight: Boolean(s.flashlight),
+      attackCombo: Math.round(clampNum(s.attackCombo, 0, 5)),
+      attackTimer: round2(clampNum(s.attackTimer, 0, 5)),
+      heavy: Boolean(s.heavy),
+      dodge: Boolean(s.dodge),
+      guard: Boolean(s.guard),
+      updatedAt: serverTimestamp(),
+    };
+  }
+
+  private buildCloudPlayerUpdatePayload() {
+    const s = this.latestLocalState;
+    return {
+      name: sanitizePlayerName(this.playerName),
+      colorIdx: this.cloudColorIdx,
+      mapId: sanitizeMapId(s.mapId),
+      x: round2(clampNum(s.x, -499, 499)),
+      y: round2(clampNum(s.y, -99, 499)),
+      z: round2(clampNum(s.z, -499, 499)),
+      yaw: normalizeYaw(s.yaw),
+      speed: round2(clampNum(s.speed, 0, 39)),
+      crouch: Boolean(s.crouch),
+      sprint: Boolean(s.sprint),
+      swim: Boolean(s.swim),
+      flashlight: Boolean(s.flashlight),
+      attackCombo: Math.round(clampNum(s.attackCombo, 0, 5)),
+      attackTimer: round2(clampNum(s.attackTimer, 0, 5)),
+      heavy: Boolean(s.heavy),
+      dodge: Boolean(s.dodge),
+      guard: Boolean(s.guard),
+      updatedAt: serverTimestamp(),
+    };
+  }
+
+  private async deleteOwnCloudPlayerDoc(targetRoomId: string): Promise<void> {
+    if (!this.cloudPlayerDocCreated) return;
+    this.cloudPlayerDocCreated = false;
+    const playerPath = `rooms/${targetRoomId}/players/${this.cloudSessionId}`;
+    try {
+      await deleteDoc(doc(db, 'rooms', targetRoomId, 'players', this.cloudSessionId));
+    } catch {
+      // Best effort cleanup on exit/switch
+      void playerPath;
+    }
+  }
+
+  private reportCloudError(error: unknown, op: OperationType, path: string): void {
+    try {
+      handleFirestoreError(error, op, path);
+    } catch (wrapped) {
+      if (wrapped instanceof Error) {
+        this.callbacks.onFirestoreError?.(wrapped);
+      }
+    }
+  }
+
+  private async activateCloudFirestore(): Promise<void> {
+    const user = this.currentUser;
+    if (this.disposed || !user) return;
+
+    this.teardownLocalSockets();
+    this.teardownCloud();
+
+    const seq = ++this.cloudJoinSeq;
+    const activeRoom = this.roomId;
+    this.mode = 'cloud';
+    this.selfId = this.cloudSessionId;
+    this.players.clear();
+    this.emitPlayers(true);
+    this.callbacks.onStatusChange('connecting', activeRoom, this.selfId, 'cloud');
+
+    // 1. Ensure parent /rooms/{roomId} exists (Master Gate requirement)
+    const roomPath = `rooms/${activeRoom}`;
+    const roomRef = doc(db, 'rooms', activeRoom);
+    try {
+      const snap = await getDoc(roomRef);
+      if (this.disposed || seq !== this.cloudJoinSeq) return;
+      if (!snap.exists()) {
+        try {
+          await setDoc(roomRef, {
+            roomId: activeRoom,
+            createdBy: user.uid,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        } catch (createErr) {
+          // If another client created the exact same room simultaneously, re-verify existence
+          const retrySnap = await getDoc(roomRef);
+          if (!retrySnap.exists()) {
+            this.reportCloudError(createErr, OperationType.CREATE, roomPath);
+            this.callbacks.onStatusChange('reconnecting', activeRoom, this.selfId, 'cloud');
+            return;
+          }
+        }
+      }
+    } catch (error) {
+      this.reportCloudError(error, OperationType.GET, roomPath);
+      this.callbacks.onStatusChange('reconnecting', activeRoom, this.selfId, 'cloud');
+      return;
+    }
+
+    if (this.disposed || seq !== this.cloudJoinSeq) return;
+
+    // 2. Register own session document in /rooms/{roomId}/players/{sessionId}
+    const playerPath = `rooms/${activeRoom}/players/${this.cloudSessionId}`;
+    const playerRef = doc(db, 'rooms', activeRoom, 'players', this.cloudSessionId);
+    try {
+      await setDoc(playerRef, this.buildCloudPlayerPayload(user));
+      this.cloudPlayerDocCreated = true;
+    } catch (error) {
+      this.reportCloudError(error, OperationType.CREATE, playerPath);
+      this.callbacks.onStatusChange('reconnecting', activeRoom, this.selfId, 'cloud');
+      return;
+    }
+
+    if (this.disposed || seq !== this.cloudJoinSeq) return;
+
+    // 3. Subscribe to live players list inside this room (where roomId == activeRoom satisfies allow list)
+    const playersCollectionPath = `rooms/${activeRoom}/players`;
+    const playersQ = query(
+      collection(db, 'rooms', activeRoom, 'players'),
+      where('roomId', '==', activeRoom)
+    );
+    this.playersUnsub = onSnapshot(
+      playersQ,
+      (snapshot) => {
+        if (this.disposed || seq !== this.cloudJoinSeq) return;
+        const now = Date.now();
+        const prevIds = new Set(this.players.keys());
+        const nextIds = new Set<string>();
+        let structureChanged = false;
+
+        this.players.clear();
+        snapshot.forEach((docSnap) => {
+          if (docSnap.id === this.cloudSessionId) return;
+          const d = docSnap.data() as Record<string, unknown>;
+          const tsObj = d.updatedAt as Timestamp | null | undefined;
+          const updatedMs =
+            tsObj && typeof tsObj.toMillis === 'function' ? tsObj.toMillis() : now;
+          if (now - updatedMs > 30000) return;
+
+          const rp: RemotePlayerState = {
+            id: typeof d.id === 'string' ? d.id : docSnap.id,
+            roomId: activeRoom,
+            name: typeof d.name === 'string' ? d.name : 'Sayohatchi',
+            colorIdx: typeof d.colorIdx === 'number' ? d.colorIdx : 0,
+            mapId: sanitizeMapId(d.mapId as WorldMapId),
+            x: typeof d.x === 'number' ? d.x : 0,
+            y: typeof d.y === 'number' ? d.y : 3,
+            z: typeof d.z === 'number' ? d.z : 0,
+            yaw: typeof d.yaw === 'number' ? d.yaw : 0,
+            speed: typeof d.speed === 'number' ? d.speed : 0,
+            crouch: Boolean(d.crouch),
+            sprint: Boolean(d.sprint),
+            swim: Boolean(d.swim),
+            flashlight: Boolean(d.flashlight),
+            attackCombo: typeof d.attackCombo === 'number' ? d.attackCombo : 0,
+            attackTimer: typeof d.attackTimer === 'number' ? d.attackTimer : 0,
+            heavy: Boolean(d.heavy),
+            dodge: Boolean(d.dodge),
+            guard: Boolean(d.guard),
+            lastUpdated: updatedMs,
+          };
+
+          const prev = prevIds.has(rp.id);
+          if (!prev) structureChanged = true;
+          nextIds.add(rp.id);
+          this.players.set(rp.id, rp);
+        });
+
+        for (const oldId of prevIds) {
+          if (!nextIds.has(oldId)) structureChanged = true;
+        }
+
+        this.emitPlayers(structureChanged);
+      },
+      (error) => {
+        this.reportCloudError(error, OperationType.LIST, playersCollectionPath);
+        this.callbacks.onStatusChange('reconnecting', activeRoom, this.selfId, 'cloud');
+      }
+    );
+
+    // 4. Subscribe to live room chat messages (client-side sort avoids composite index requirement)
+    const messagesCollectionPath = `rooms/${activeRoom}/messages`;
+    const messagesQ = query(
+      collection(db, 'rooms', activeRoom, 'messages'),
+      where('roomId', '==', activeRoom)
+    );
+    this.messagesUnsub = onSnapshot(
+      messagesQ,
+      (snapshot) => {
+        if (this.disposed || seq !== this.cloudJoinSeq) return;
+        const list: MultiplayerChatMessage[] = [];
+        snapshot.forEach((docSnap) => {
+          const d = docSnap.data() as Record<string, unknown>;
+          const tsObj = d.createdAt as Timestamp | null | undefined;
+          const tsMs =
+            tsObj && typeof tsObj.toMillis === 'function' ? tsObj.toMillis() : Date.now();
+          list.push({
+            id: typeof d.id === 'string' ? d.id : docSnap.id,
+            playerId: typeof d.playerId === 'string' ? d.playerId : '',
+            name: typeof d.name === 'string' ? d.name : 'Sayohatchi',
+            colorIdx: typeof d.colorIdx === 'number' ? d.colorIdx : 0,
+            text: typeof d.text === 'string' ? d.text : '',
+            ts: tsMs,
+          });
+        });
+        list.sort((a, b) => a.ts - b.ts);
+        const recent = list.slice(-50);
+        if (this.callbacks.onChatMessagesReplace) {
+          this.callbacks.onChatMessagesReplace(recent);
+        } else {
+          for (const m of recent) {
+            this.callbacks.onChatMessage(m);
+          }
+        }
+      },
+      (error) => {
+        this.reportCloudError(error, OperationType.LIST, messagesCollectionPath);
+      }
+    );
+
+    // 5. Periodic heartbeat + local stale player pruner
+    this.cloudHeartbeatTimer = window.setInterval(() => {
+      void this.flushCloudState(true);
+    }, 5000);
+
+    this.cloudPruneTimer = window.setInterval(() => {
+      const now = Date.now();
+      let changed = false;
+      for (const [id, rp] of this.players.entries()) {
+        if (now - rp.lastUpdated > 30000) {
+          this.players.delete(id);
+          changed = true;
+        }
+      }
+      if (changed) this.emitPlayers(true);
+    }, 4500);
+
+    this.callbacks.onStatusChange('connected', activeRoom, this.selfId, 'cloud');
+  }
+
+  private async flushCloudState(force = false): Promise<void> {
+    if (
+      this.disposed ||
+      this.mode !== 'cloud' ||
+      !this.currentUser ||
+      !this.cloudPlayerDocCreated ||
+      this.cloudWriteInFlight
+    ) {
+      return;
+    }
+
+    const s = this.latestLocalState;
+    const now = performance.now();
+    const signature = `${s.mapId}:${Math.round(s.x * 8)}:${Math.round(s.y * 8)}:${Math.round(s.z * 8)}:${Math.round(s.yaw * 16)}:${s.crouch ? 1 : 0}:${s.sprint ? 1 : 0}:${s.swim ? 1 : 0}:${s.flashlight ? 1 : 0}:${s.attackTimer > 0 ? 1 : 0}:${s.dodge ? 1 : 0}:${s.guard ? 1 : 0}`;
+    const urgent =
+      s.attackTimer > 0 ||
+      s.dodge ||
+      signature.split(':')[0] !== this.lastSentSignature.split(':')[0];
+
+    if (!force && signature === this.lastSentSignature && now - this.lastSentAt < 4500) {
+      return;
+    }
+    if (!force && !urgent && now - this.lastSentAt < 180) {
+      return;
+    }
+
+    this.lastSentAt = now;
+    this.lastSentSignature = signature;
+    this.cloudWriteInFlight = true;
+
+    const playerPath = `rooms/${this.roomId}/players/${this.cloudSessionId}`;
+    const playerRef = doc(db, 'rooms', this.roomId, 'players', this.cloudSessionId);
+    try {
+      await updateDoc(playerRef, this.buildCloudPlayerUpdatePayload());
+    } catch (error) {
+      // Recreate doc cleanly if it didn't exist yet or was removed
+      const msg = error instanceof Error ? error.message : String(error);
+      if (msg.includes('No document to update') || msg.includes('NOT_FOUND')) {
+        try {
+          await setDoc(playerRef, this.buildCloudPlayerPayload(this.currentUser));
+        } catch (retryErr) {
+          this.reportCloudError(retryErr, OperationType.WRITE, playerPath);
+        }
+      } else {
+        this.reportCloudError(error, OperationType.UPDATE, playerPath);
+      }
+    } finally {
+      this.cloudWriteInFlight = false;
+    }
+  }
 
   private getWsUrl(): string {
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -195,7 +701,7 @@ export class MultiplayerClient {
   }
 
   private connectWebSocket(): void {
-    if (this.disposed) return;
+    if (this.disposed || this.currentUser) return;
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       return;
     }
@@ -205,7 +711,8 @@ export class MultiplayerClient {
     this.callbacks.onStatusChange(
       this.reconnectAttempt > 0 ? 'reconnecting' : 'connecting',
       this.roomId,
-      this.selfId
+      this.selfId,
+      'local'
     );
 
     try {
@@ -213,7 +720,7 @@ export class MultiplayerClient {
       this.ws = ws;
 
       this.wsConnectTimeout = window.setTimeout(() => {
-        if (this.disposed || this.ws !== ws) return;
+        if (this.disposed || this.currentUser || this.ws !== ws) return;
         if (ws.readyState !== WebSocket.OPEN) {
           try {
             ws.close();
@@ -226,7 +733,7 @@ export class MultiplayerClient {
       }, 2400);
 
       ws.onopen = () => {
-        if (this.disposed || this.ws !== ws) return;
+        if (this.disposed || this.currentUser || this.ws !== ws) return;
         this.clearWsTimers();
         this.reconnectAttempt = 0;
         this.sendWsRaw({
@@ -242,7 +749,7 @@ export class MultiplayerClient {
       };
 
       ws.onmessage = (event) => {
-        if (this.disposed || this.ws !== ws) return;
+        if (this.disposed || this.currentUser || this.ws !== ws) return;
         let data: Record<string, unknown>;
         try {
           const parsed = JSON.parse(String(event.data));
@@ -277,7 +784,7 @@ export class MultiplayerClient {
               }
             }
           }
-          this.callbacks.onStatusChange('connected', this.roomId, this.selfId);
+          this.callbacks.onStatusChange('connected', this.roomId, this.selfId, 'local');
           this.emitPlayers(true);
           return;
         }
@@ -322,13 +829,12 @@ export class MultiplayerClient {
           this.ws = null;
         }
         this.clearWsTimers();
-        if (this.disposed) return;
+        if (this.disposed || this.currentUser) return;
 
-        // If WS closed quickly or repeatedly, fall back immediately to HTTP polling sync
         if (this.reconnectAttempt >= 1) {
           void this.activateHttpFallback();
         } else {
-          this.callbacks.onStatusChange('reconnecting', this.roomId, this.selfId);
+          this.callbacks.onStatusChange('reconnecting', this.roomId, this.selfId, 'local');
           this.scheduleWsReconnect();
         }
       };
@@ -342,7 +848,7 @@ export class MultiplayerClient {
   }
 
   private scheduleWsReconnect(): void {
-    if (this.disposed || this.reconnectTimer !== null) return;
+    if (this.disposed || this.currentUser || this.reconnectTimer !== null) return;
     const delay = Math.min(4000, 900 * Math.pow(1.5, this.reconnectAttempt));
     this.reconnectAttempt++;
     this.reconnectTimer = window.setTimeout(() => {
@@ -352,7 +858,7 @@ export class MultiplayerClient {
   }
 
   private async activateHttpFallback(): Promise<void> {
-    if (this.disposed) return;
+    if (this.disposed || this.currentUser) return;
     this.mode = 'http';
     this.clearWsTimers();
     this.clearHttpTimer();
@@ -372,8 +878,8 @@ export class MultiplayerClient {
           yaw: this.latestLocalState.yaw,
         }),
       });
-      if (!res.ok || this.disposed) {
-        this.callbacks.onStatusChange('reconnecting', this.roomId, this.selfId);
+      if (!res.ok || this.disposed || this.currentUser) {
+        this.callbacks.onStatusChange('reconnecting', this.roomId, this.selfId, 'local');
         this.scheduleHttpRetry();
         return;
       }
@@ -390,20 +896,20 @@ export class MultiplayerClient {
         this.selfId = data.selfId;
         this.roomId = data.roomId || this.roomId;
         this.applyHttpSnapshot(data.players || [], data.messages || [], true);
-        this.callbacks.onStatusChange('connected', this.roomId, this.selfId);
+        this.callbacks.onStatusChange('connected', this.roomId, this.selfId, 'local');
 
         this.httpSyncTimer = window.setInterval(() => {
           void this.pollHttpSync();
         }, 160);
       }
     } catch {
-      this.callbacks.onStatusChange('reconnecting', this.roomId, this.selfId);
+      this.callbacks.onStatusChange('reconnecting', this.roomId, this.selfId, 'local');
       this.scheduleHttpRetry();
     }
   }
 
   private scheduleHttpRetry(): void {
-    if (this.disposed || this.reconnectTimer !== null) return;
+    if (this.disposed || this.currentUser || this.reconnectTimer !== null) return;
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null;
       void this.activateHttpFallback();
@@ -411,7 +917,15 @@ export class MultiplayerClient {
   }
 
   private async pollHttpSync(): Promise<void> {
-    if (this.disposed || this.mode !== 'http' || !this.selfId || this.httpSyncInFlight) return;
+    if (
+      this.disposed ||
+      this.currentUser ||
+      this.mode !== 'http' ||
+      !this.selfId ||
+      this.httpSyncInFlight
+    ) {
+      return;
+    }
     this.httpSyncInFlight = true;
     try {
       const res = await fetch('/api/mp/sync', {
@@ -439,7 +953,7 @@ export class MultiplayerClient {
         this.applyHttpSnapshot(data.players || [], data.messages || [], false);
       }
     } catch {
-      this.callbacks.onStatusChange('reconnecting', this.roomId, this.selfId);
+      this.callbacks.onStatusChange('reconnecting', this.roomId, this.selfId, 'local');
     } finally {
       this.httpSyncInFlight = false;
     }
@@ -495,6 +1009,10 @@ export class MultiplayerClient {
 
   public pushLocalState(state: NetLocalPlayerState): void {
     this.latestLocalState = { ...state };
+    if (this.mode === 'cloud') {
+      void this.flushCloudState(false);
+      return;
+    }
     if (this.mode !== 'ws' || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
     const now = performance.now();
@@ -520,17 +1038,22 @@ export class MultiplayerClient {
   }
 
   public joinRoom(nextRoomId: string): void {
-    const cleaned = nextRoomId.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 20);
-    const targetRoom = cleaned.length >= 2 ? cleaned : 'global';
-    if (targetRoom === this.roomId && (this.ws?.readyState === WebSocket.OPEN || this.mode === 'http')) {
+    const targetRoom = sanitizeRoomId(nextRoomId);
+    if (
+      targetRoom === this.roomId &&
+      (this.mode === 'cloud' || this.ws?.readyState === WebSocket.OPEN || this.mode === 'http')
+    ) {
       return;
     }
 
-    if (this.mode === 'http' && this.selfId) {
+    const oldRoom = this.roomId;
+    if (this.mode === 'cloud') {
+      void this.deleteOwnCloudPlayerDoc(oldRoom);
+    } else if (this.mode === 'http' && this.selfId) {
       void fetch('/api/mp/leave', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ roomId: this.roomId, playerId: this.selfId }),
+        body: JSON.stringify({ roomId: oldRoom, playerId: this.selfId }),
       }).catch(() => {});
     }
 
@@ -539,7 +1062,9 @@ export class MultiplayerClient {
     this.players.clear();
     this.emitPlayers(true);
 
-    if (this.mode === 'http') {
+    if (this.mode === 'cloud' && this.currentUser) {
+      void this.activateCloudFirestore();
+    } else if (this.mode === 'http') {
       void this.activateHttpFallback();
     } else if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.sendWsRaw({
@@ -558,7 +1083,7 @@ export class MultiplayerClient {
   }
 
   public setPlayerName(nextName: string): void {
-    const cleaned = nextName.trim().slice(0, 18) || 'Sayohatchi';
+    const cleaned = sanitizePlayerName(nextName);
     this.playerName = cleaned;
     try {
       localStorage.setItem(MP_NAME_STORAGE_KEY, cleaned);
@@ -566,6 +1091,10 @@ export class MultiplayerClient {
       // Ignore storage write errors
     }
 
+    if (this.mode === 'cloud') {
+      void this.flushCloudState(true);
+      return;
+    }
     if (this.mode === 'http' && this.selfId) {
       void fetch('/api/mp/rename', {
         method: 'POST',
@@ -580,6 +1109,26 @@ export class MultiplayerClient {
   public sendChat(text: string): void {
     const trimmed = text.trim().slice(0, 140);
     if (!trimmed) return;
+
+    if (this.mode === 'cloud' && this.currentUser) {
+      const msgId = `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+      const msgPath = `rooms/${this.roomId}/messages/${msgId}`;
+      const msgRef = doc(db, 'rooms', this.roomId, 'messages', msgId);
+      void setDoc(msgRef, {
+        id: msgId,
+        ownerUid: this.currentUser.uid,
+        playerId: this.cloudSessionId,
+        roomId: this.roomId,
+        name: sanitizePlayerName(this.playerName),
+        colorIdx: this.cloudColorIdx,
+        text: trimmed,
+        createdAt: serverTimestamp(),
+      }).catch((err) => {
+        this.reportCloudError(err, OperationType.CREATE, msgPath);
+      });
+      return;
+    }
+
     if (this.mode === 'http' && this.selfId) {
       void fetch('/api/mp/chat', {
         method: 'POST',
@@ -601,23 +1150,15 @@ export class MultiplayerClient {
 
   public dispose(): void {
     this.disposed = true;
-    this.clearWsTimers();
-    this.clearHttpTimer();
-    if (typeof window !== 'undefined') {
-      window.removeEventListener('pagehide', this.handlePageHide);
+    if (this.authUnsub) {
+      this.authUnsub();
+      this.authUnsub = null;
     }
     this.handlePageHide();
-    if (this.ws) {
-      this.ws.onopen = null;
-      this.ws.onmessage = null;
-      this.ws.onclose = null;
-      this.ws.onerror = null;
-      try {
-        this.ws.close();
-      } catch {
-        // Ignore close errors
-      }
-      this.ws = null;
+    this.teardownCloud();
+    this.teardownLocalSockets();
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('pagehide', this.handlePageHide);
     }
     this.players.clear();
   }

@@ -1,0 +1,191 @@
+{
+  "entities": {
+    "Room": {
+      "title": "Room",
+      "description": "Online co-op multiplayer room metadata shared across devices.",
+      "type": "object",
+      "properties": {
+        "roomId": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 20,
+          "pattern": "^[a-z0-9_-]+$"
+        },
+        "createdBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["roomId", "createdBy", "createdAt", "updatedAt"]
+    },
+    "RoomPlayer": {
+      "title": "RoomPlayer",
+      "description": "Live explorer position, animation, and map state in an online room.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "ownerUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "roomId": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 20,
+          "pattern": "^[a-z0-9_-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 18
+        },
+        "colorIdx": {
+          "type": "number"
+        },
+        "mapId": {
+          "type": "string",
+          "enum": [
+            "lost_valley",
+            "alpine_glacier",
+            "emerald_archipelago",
+            "saffron_canyon",
+            "misty_wetlands",
+            "crimson_caldera",
+            "twin_fjords",
+            "highland_meadows"
+          ]
+        },
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "z": { "type": "number" },
+        "yaw": { "type": "number" },
+        "speed": { "type": "number" },
+        "crouch": { "type": "boolean" },
+        "sprint": { "type": "boolean" },
+        "swim": { "type": "boolean" },
+        "flashlight": { "type": "boolean" },
+        "attackCombo": { "type": "number" },
+        "attackTimer": { "type": "number" },
+        "heavy": { "type": "boolean" },
+        "dodge": { "type": "boolean" },
+        "guard": { "type": "boolean" },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerUid",
+        "roomId",
+        "name",
+        "colorIdx",
+        "mapId",
+        "x",
+        "y",
+        "z",
+        "yaw",
+        "speed",
+        "crouch",
+        "sprint",
+        "swim",
+        "flashlight",
+        "attackCombo",
+        "attackTimer",
+        "heavy",
+        "dodge",
+        "guard",
+        "updatedAt"
+      ]
+    },
+    "RoomMessage": {
+      "title": "RoomMessage",
+      "description": "Short chat message inside a multiplayer co-op room.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "ownerUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "playerId": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "roomId": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 20,
+          "pattern": "^[a-z0-9_-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 18
+        },
+        "colorIdx": {
+          "type": "number"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 140
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerUid",
+        "playerId",
+        "roomId",
+        "name",
+        "colorIdx",
+        "text",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/rooms/{roomId}": {
+      "schema": { "$ref": "#/entities/Room" },
+      "description": "Shared multiplayer room metadata document."
+    },
+    "/rooms/{roomId}/players/{playerId}": {
+      "schema": { "$ref": "#/entities/RoomPlayer" },
+      "description": "Real-time player avatar state for an active session in the room."
+    },
+    "/rooms/{roomId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/RoomMessage" },
+      "description": "Co-op room chat messages."
+    }
+  }
+}

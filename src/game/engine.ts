@@ -432,7 +432,13 @@ export class SurvivalEngine {
     if (this.disposed) return;
 
     this.character = createCharacterSystem(this.scene, textures);
-    this.character.setPosition(mapDef.spawn.x, mapDef.spawn.z, mapDef.spawn.yaw);
+    const spawnAngle = Math.random() * Math.PI * 2;
+    const spawnRadius = 1.6 + Math.random() * 1.4;
+    this.character.setPosition(
+      mapDef.spawn.x + Math.cos(spawnAngle) * spawnRadius,
+      mapDef.spawn.z + Math.sin(spawnAngle) * spawnRadius,
+      mapDef.spawn.yaw
+    );
     this.character.state.yaw = this.camYaw;
     this.character.state.pitch = this.camPitch;
     this.character.group.rotation.y = this.camYaw + Math.PI;
@@ -1083,7 +1089,13 @@ export class SurvivalEngine {
       this.timeHours = mapDef.defaultTimeHours;
 
       this.introTimer = 2.0;
-      this.character.setPosition(mapDef.spawn.x, mapDef.spawn.z, mapDef.spawn.yaw);
+      const switchAngle = Math.random() * Math.PI * 2;
+      const switchRadius = 1.6 + Math.random() * 1.4;
+      this.character.setPosition(
+        mapDef.spawn.x + Math.cos(switchAngle) * switchRadius,
+        mapDef.spawn.z + Math.sin(switchAngle) * switchRadius,
+        mapDef.spawn.yaw
+      );
       this.camYaw = mapDef.spawn.yaw;
       this.camPitch = -0.11;
       this.smoothCamPos.set(

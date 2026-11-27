@@ -17,8 +17,7 @@ interface RemoteAvatarRig {
   leftLeg: THREE.Group;
   rightLeg: THREE.Group;
   weaponPivot: THREE.Group;
-  flashlightLight: THREE.SpotLight;
-  flashlightTarget: THREE.Object3D;
+  flashlightBulb: THREE.Mesh;
   flashlightCone: THREE.Mesh;
   labelSprite: THREE.Sprite;
   labelTex: THREE.CanvasTexture;
@@ -28,6 +27,28 @@ interface RemoteAvatarRig {
   yaw: number;
   walkPhase: number;
   swimPhase: number;
+}
+
+function drawRoundedRect(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number
+): void {
+  const radius = Math.min(r, w * 0.5, h * 0.5);
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.lineTo(x + w - radius, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+  ctx.lineTo(x + w, y + h - radius);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+  ctx.lineTo(x + radius, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+  ctx.lineTo(x, y + radius);
+  ctx.quadraticCurveTo(x, y, x + radius, y);
+  ctx.closePath();
 }
 
 function createNameTagTexture(name: string, colorCss: string): THREE.CanvasTexture {
@@ -45,9 +66,8 @@ function createNameTagTexture(name: string, colorCss: string): THREE.CanvasTextu
     const x = (canvas.width - pillW) * 0.5;
     const y = (canvas.height - pillH) * 0.5;
 
-    ctx.fillStyle = 'rgba(10, 14, 20, 0.84)';
-    ctx.beginPath();
-    ctx.roundRect(x, y, pillW, pillH, 10);
+    ctx.fillStyle = 'rgba(10, 14, 20, 0.86)';
+    drawRoundedRect(ctx, x, y, pillW, pillH, 10);
     ctx.fill();
 
     ctx.strokeStyle = colorCss;
@@ -88,6 +108,7 @@ export class RemotePlayersSystem {
   private sharedPantsMat: THREE.MeshStandardMaterial;
   private sharedBootMat: THREE.MeshStandardMaterial;
   private sharedMetalMat: THREE.MeshStandardMaterial;
+  private sharedBulbGeo: THREE.SphereGeometry;
   private sharedConeGeo: THREE.ConeGeometry;
 
   constructor(scene: THREE.Scene, textures: ProceduralTextureSet) {
@@ -127,9 +148,10 @@ export class RemotePlayersSystem {
       roughness: 0.25,
       metalness: 0.88,
     });
+    this.sharedBulbGeo = new THREE.SphereGeometry(0.038, 8, 8);
 
-    this.sharedConeGeo = new THREE.ConeGeometry(2.1, 10, 12, 1, true);
-    this.sharedConeGeo.translate(0, -5, 0);
+    this.sharedConeGeo = new THREE.ConeGeometry(1.9, 9.5, 12, 1, true);
+    this.sharedConeGeo.translate(0, -4.75, 0);
     this.sharedConeGeo.rotateX(-Math.PI * 0.5);
   }
 
@@ -253,23 +275,28 @@ export class RemotePlayersSystem {
     const leftLeg = buildLeg(-1);
     const rightLeg = buildLeg(1);
 
-    // Remote Flashlight Cone & Spot
-    const flashlightLight = new THREE.SpotLight(0xfff1d4, 0, 40, Math.PI / 5.5, 0.55, 1.4);
-    this.scene.add(flashlightLight);
-    const flashlightTarget = new THREE.Object3D();
-    this.scene.add(flashlightTarget);
-    flashlightLight.target = flashlightTarget;
+    // Lightweight volumetric flashlight cone & emitter bulb (zero dynamic SpotLight shader recompiles)
+    const bulbMat = new THREE.MeshBasicMaterial({
+      color: 0xfff3d6,
+    });
+    const flashlightBulb = new THREE.Mesh(this.sharedBulbGeo, bulbMat);
+    flashlightBulb.position.set(-0.2, 1.25, 0.22);
+    flashlightBulb.visible = false;
+    root.add(flashlightBulb);
 
     const coneMat = new THREE.MeshBasicMaterial({
       color: 0xffe8c2,
       transparent: true,
-      opacity: 0,
+      opacity: 0.09,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
       side: THREE.DoubleSide,
     });
     const flashlightCone = new THREE.Mesh(this.sharedConeGeo, coneMat);
-    this.scene.add(flashlightCone);
+    flashlightCone.position.set(-0.2, 1.25, 0.22);
+    flashlightCone.rotation.x = 0.08;
+    flashlightCone.visible = false;
+    root.add(flashlightCone);
 
     const labelTex = createNameTagTexture(player.name, colorCss);
     const labelMat = new THREE.SpriteMaterial({
@@ -302,8 +329,7 @@ export class RemotePlayersSystem {
       leftLeg,
       rightLeg,
       weaponPivot,
-      flashlightLight,
-      flashlightTarget,
+      flashlightBulb,
       flashlightCone,
       labelSprite,
       labelTex,
@@ -320,16 +346,16 @@ export class RemotePlayersSystem {
     const rig = this.avatars.get(id);
     if (!rig) return;
     this.scene.remove(rig.root);
-    this.scene.remove(rig.flashlightLight);
-    this.scene.remove(rig.flashlightTarget);
-    this.scene.remove(rig.flashlightCone);
 
     rig.root.traverse((obj) => {
       if (obj instanceof THREE.Mesh) {
-        obj.geometry.dispose();
+        if (obj.geometry !== this.sharedBulbGeo && obj.geometry !== this.sharedConeGeo) {
+          obj.geometry.dispose();
+        }
       }
     });
-    rig.flashlightCone.material instanceof THREE.Material && rig.flashlightCone.material.dispose();
+    (rig.flashlightBulb.material as THREE.Material).dispose();
+    (rig.flashlightCone.material as THREE.Material).dispose();
     rig.labelTex.dispose();
     rig.labelMat.dispose();
     rig.accentMat.dispose();
@@ -404,21 +430,12 @@ export class RemotePlayersSystem {
         rig.pony.rotation.x = 0.25 + moveFactor * 0.45 + Math.sin(rig.walkPhase * 2) * 0.12 * moveFactor;
       }
 
-      // Flashlight sync
-      if (p.flashlight) {
-        const fwdX = -Math.sin(rig.yaw);
-        const fwdZ = -Math.cos(rig.yaw);
-        const lampY = rig.pos.y + (p.crouch ? 0.95 : 1.28);
-        rig.flashlightLight.position.set(rig.pos.x + fwdX * 0.3, lampY, rig.pos.z + fwdZ * 0.3);
-        rig.flashlightTarget.position.set(rig.pos.x + fwdX * 14, lampY - 1.2, rig.pos.z + fwdZ * 14);
-        rig.flashlightLight.intensity = 6.5;
-        rig.flashlightCone.position.copy(rig.flashlightLight.position);
-        rig.flashlightCone.lookAt(rig.flashlightTarget.position);
-        (rig.flashlightCone.material as THREE.MeshBasicMaterial).opacity = 0.08;
-      } else {
-        rig.flashlightLight.intensity = 0;
-        (rig.flashlightCone.material as THREE.MeshBasicMaterial).opacity = 0;
-      }
+      // Lightweight flashlight sync
+      const lampY = p.crouch ? 0.95 : 1.25;
+      rig.flashlightBulb.visible = p.flashlight;
+      rig.flashlightCone.visible = p.flashlight;
+      rig.flashlightBulb.position.y = lampY;
+      rig.flashlightCone.position.y = lampY;
     }
 
     for (const id of Array.from(this.avatars.keys())) {
@@ -438,6 +455,7 @@ export class RemotePlayersSystem {
     this.sharedPantsMat.dispose();
     this.sharedBootMat.dispose();
     this.sharedMetalMat.dispose();
+    this.sharedBulbGeo.dispose();
     this.sharedConeGeo.dispose();
   }
 }

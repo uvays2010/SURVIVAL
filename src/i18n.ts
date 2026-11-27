@@ -199,6 +199,13 @@ export interface TranslationBundle {
     send: string;
     noMessages: string;
     inviteHint: string;
+    cloudConnected: string;
+    localMode: string;
+    connectGoogle: string;
+    cloudBannerTitle: string;
+    cloudBannerDesc: string;
+    signOut: string;
+    authError: string;
   };
   webglErrorFallback: string;
 }
@@ -491,6 +498,13 @@ export const TRANSLATIONS: Record<GameLang, TranslationBundle> = {
       send: 'Yuborish',
       noMessages: 'Hali xabarlar yo‘q',
       inviteHint: 'Do‘stlar bilan o‘ynash uchun ikkalangiz ham ulashilgan havola va bir xil xona kodi bilan kiring.',
+      cloudConnected: 'Bulut · PC + Telefon',
+      localMode: 'Faqat bitta server',
+      connectGoogle: 'Google bilan ulanish',
+      cloudBannerTitle: 'Kompyuter va telefondan birga o‘ynash',
+      cloudBannerDesc: 'Kompyuter, telefon va ilova bir-birini ko‘rishi uchun bir marta Google orqali kiring.',
+      signOut: 'Chiqish',
+      authError: 'Google orqali kirish bekor qilindi yoki bloklandi. Qayta bosing.',
     },
     webglErrorFallback: 'Ushbu qurilmada 3D WebGL grafikasi ishga tushmadi.',
   },
@@ -781,6 +795,13 @@ export const TRANSLATIONS: Record<GameLang, TranslationBundle> = {
       send: 'Отправить',
       noMessages: 'Сообщений пока нет',
       inviteHint: 'Чтобы играть вместе, откройте общую ссылку на обоих устройствах и введите один код комнаты.',
+      cloudConnected: 'Облако · ПК + Телефон',
+      localMode: 'Только локально',
+      connectGoogle: 'Войти через Google',
+      cloudBannerTitle: 'Игра с ПК и телефона вместе',
+      cloudBannerDesc: 'Войдите через Google один раз, чтобы синхронизировать комнаты между всеми устройствами.',
+      signOut: 'Выйти',
+      authError: 'Окно входа Google заблокировано или отменено. Попробуйте ещё раз.',
     },
     webglErrorFallback: 'WebGL графика недоступна на этом устройстве.',
   },
@@ -1071,6 +1092,13 @@ export const TRANSLATIONS: Record<GameLang, TranslationBundle> = {
       send: 'Send',
       noMessages: 'No messages yet',
       inviteHint: 'To play together, open the shared app link on both devices using the same room code.',
+      cloudConnected: 'Cloud · PC + Phone',
+      localMode: 'Local Server Only',
+      connectGoogle: 'Sign in with Google',
+      cloudBannerTitle: 'Cross-Device Co-op (PC + Phone)',
+      cloudBannerDesc: 'Sign in once with Google so PC, phone, and installed app share the exact same live room.',
+      signOut: 'Sign out',
+      authError: 'Sign-in popup was blocked or cancelled. Please try again.',
     },
     webglErrorFallback: 'WebGL context unavailable on this device.',
   },
