@@ -878,6 +878,13 @@ export class MultiplayerClient {
           yaw: this.latestLocalState.yaw,
         }),
       });
+      const contentType = res.headers.get('content-type') || '';
+      if (res.status === 404 || !contentType.includes('application/json')) {
+        if (!this.disposed && !this.currentUser) {
+          this.callbacks.onStatusChange('disconnected', this.roomId, this.selfId, 'local');
+        }
+        return;
+      }
       if (!res.ok || this.disposed || this.currentUser) {
         this.callbacks.onStatusChange('reconnecting', this.roomId, this.selfId, 'local');
         this.scheduleHttpRetry();

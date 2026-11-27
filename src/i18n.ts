@@ -206,6 +206,11 @@ export interface TranslationBundle {
     cloudBannerDesc: string;
     signOut: string;
     authError: string;
+    authPopupBlocked: string;
+    authDomainTitle: string;
+    authDomainDesc: string;
+    copyDomain: string;
+    openFirebaseAuth: string;
   };
   webglErrorFallback: string;
 }
@@ -505,6 +510,11 @@ export const TRANSLATIONS: Record<GameLang, TranslationBundle> = {
       cloudBannerDesc: 'Kompyuter, telefon va ilova bir-birini ko‘rishi uchun bir marta Google orqali kiring.',
       signOut: 'Chiqish',
       authError: 'Google orqali kirish bekor qilindi yoki bloklandi. Qayta bosing.',
+      authPopupBlocked: 'Brauzer Google kirish oynasini blokladi. Popup oynaga ruxsat bering va qayta bosing.',
+      authDomainTitle: 'Bu domen Firebase ruxsatlariga qo‘shilmagan',
+      authDomainDesc: 'Vercel yoki shaxsiy domenda ishlashi uchun quyidagi domenni Firebase Console -> Authentication -> Settings -> Authorized domains ro‘yxatiga qo‘shing:',
+      copyDomain: 'Domenni nusxalash',
+      openFirebaseAuth: 'Firebase sozlamalarini ochish',
     },
     webglErrorFallback: 'Ushbu qurilmada 3D WebGL grafikasi ishga tushmadi.',
   },
@@ -802,6 +812,11 @@ export const TRANSLATIONS: Record<GameLang, TranslationBundle> = {
       cloudBannerDesc: 'Войдите через Google один раз, чтобы синхронизировать комнаты между всеми устройствами.',
       signOut: 'Выйти',
       authError: 'Окно входа Google заблокировано или отменено. Попробуйте ещё раз.',
+      authPopupBlocked: 'Браузер заблокировал окно входа Google. Разрешите всплывающие окна и повторите.',
+      authDomainTitle: 'Домен не добавлен в Firebase Authorized Domains',
+      authDomainDesc: 'Чтобы вход работал на Vercel, добавьте этот домен в Firebase Console -> Authentication -> Settings -> Authorized domains:',
+      copyDomain: 'Копировать домен',
+      openFirebaseAuth: 'Открыть настройки Firebase',
     },
     webglErrorFallback: 'WebGL графика недоступна на этом устройстве.',
   },
@@ -1099,6 +1114,11 @@ export const TRANSLATIONS: Record<GameLang, TranslationBundle> = {
       cloudBannerDesc: 'Sign in once with Google so PC, phone, and installed app share the exact same live room.',
       signOut: 'Sign out',
       authError: 'Sign-in popup was blocked or cancelled. Please try again.',
+      authPopupBlocked: 'Your browser blocked the Google sign-in popup. Please allow popups and try again.',
+      authDomainTitle: 'Domain not authorized in Firebase',
+      authDomainDesc: 'To sign in from Vercel or a custom domain, add this hostname under Firebase Console -> Authentication -> Settings -> Authorized domains:',
+      copyDomain: 'Copy domain',
+      openFirebaseAuth: 'Open Firebase Auth Settings',
     },
     webglErrorFallback: 'WebGL context unavailable on this device.',
   },

@@ -3,6 +3,7 @@ import {
   Check,
   Cloud,
   Copy,
+  ExternalLink,
   LogIn,
   LogOut,
   MapPin,
@@ -12,6 +13,7 @@ import {
   WifiOff,
   X,
 } from 'lucide-react';
+import { FIREBASE_PROJECT_ID } from '../firebase';
 import {
   buildShareableRoomUrl,
   ConnectionStatus,
@@ -70,11 +72,14 @@ export const MultiplayerPanel: React.FC<MultiplayerPanelProps> = ({
   const [roomInput, setRoomInput] = useState(roomId);
   const [chatInput, setChatInput] = useState('');
   const [copied, setCopied] = useState(false);
+  const [copiedDomain, setCopiedDomain] = useState(false);
   const [showInviteUrl, setShowInviteUrl] = useState(false);
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [unauthorizedDomain, setUnauthorizedDomain] = useState<string | null>(null);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
   const shareUrl = buildShareableRoomUrl(roomId);
+  const firebaseAuthConsoleUrl = `https://console.firebase.google.com/project/${FIREBASE_PROJECT_ID}/authentication/settings`;
 
   useEffect(() => {
     setNameInput(playerName);
@@ -114,13 +119,37 @@ export const MultiplayerPanel: React.FC<MultiplayerPanelProps> = ({
 
   const handleGoogleSignIn = async () => {
     setAuthError(null);
+    setUnauthorizedDomain(null);
     setAuthBusy(true);
     try {
       await onSignInCloud();
-    } catch {
-      setAuthError(t.multiplayer.authError);
+    } catch (err) {
+      const code =
+        typeof err === 'object' && err !== null && 'code' in err
+          ? String((err as { code?: unknown }).code ?? '')
+          : '';
+      if (code === 'auth/unauthorized-domain') {
+        const host = typeof window !== 'undefined' ? window.location.hostname : '';
+        setUnauthorizedDomain(host);
+        setAuthError(`${t.multiplayer.authDomainTitle} (${code})`);
+      } else if (code === 'auth/popup-blocked') {
+        setAuthError(t.multiplayer.authPopupBlocked);
+      } else {
+        setAuthError(code ? `${t.multiplayer.authError} (${code})` : t.multiplayer.authError);
+      }
     } finally {
       setAuthBusy(false);
+    }
+  };
+
+  const handleCopyDomain = async () => {
+    if (!unauthorizedDomain) return;
+    try {
+      await navigator.clipboard.writeText(unauthorizedDomain);
+      setCopiedDomain(true);
+      window.setTimeout(() => setCopiedDomain(false), 1800);
+    } catch {
+      // Selectable input remains available
     }
   };
 
@@ -227,27 +256,75 @@ export const MultiplayerPanel: React.FC<MultiplayerPanelProps> = ({
         <div className="p-4 flex flex-col gap-4">
           {/* Cloud Sync / Google Sign-In Callout when not signed into Firebase yet */}
           {!authUser && (
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-lg bg-amber-500/12 border border-amber-400/35 p-3">
-              <div className="flex flex-col gap-0.5 min-w-0">
-                <span className="text-xs sm:text-sm font-semibold text-amber-300">
-                  {t.multiplayer.cloudBannerTitle}
-                </span>
-                <span className="text-[11px] sm:text-xs text-stone-300 leading-snug">
-                  {t.multiplayer.cloudBannerDesc}
-                </span>
-                {authError && (
-                  <span className="text-[11px] text-rose-300 mt-1">{authError}</span>
-                )}
+            <div className="flex flex-col gap-2.5 rounded-lg bg-amber-500/12 border border-amber-400/35 p-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex flex-col gap-0.5 min-w-0">
+                  <span className="text-xs sm:text-sm font-semibold text-amber-300">
+                    {t.multiplayer.cloudBannerTitle}
+                  </span>
+                  <span className="text-[11px] sm:text-xs text-stone-300 leading-snug">
+                    {t.multiplayer.cloudBannerDesc}
+                  </span>
+                  {authError && !unauthorizedDomain && (
+                    <span className="text-[11px] text-rose-300 mt-1">{authError}</span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  disabled={authBusy}
+                  onClick={handleGoogleSignIn}
+                  className="flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-xs font-semibold text-stone-950 transition-colors cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-60"
+                >
+                  <LogIn className="w-3.5 h-3.5" />
+                  <span>{t.multiplayer.connectGoogle}</span>
+                </button>
               </div>
-              <button
-                type="button"
-                disabled={authBusy}
-                onClick={handleGoogleSignIn}
-                className="flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-xs font-semibold text-stone-950 transition-colors cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-60"
-              >
-                <LogIn className="w-3.5 h-3.5" />
-                <span>{t.multiplayer.connectGoogle}</span>
-              </button>
+
+              {unauthorizedDomain && (
+                <div className="rounded-lg bg-[#0b1016] border border-rose-400/35 p-2.5 flex flex-col gap-2">
+                  <div className="text-xs font-semibold text-rose-300">
+                    {t.multiplayer.authDomainTitle}
+                  </div>
+                  <div className="text-[11px] text-stone-300 leading-relaxed">
+                    {t.multiplayer.authDomainDesc}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <input
+                      type="text"
+                      readOnly
+                      value={unauthorizedDomain}
+                      onFocus={(e) => e.target.select()}
+                      className="flex-1 min-w-[160px] px-2.5 py-1.5 rounded bg-[#141b24] border border-white/15 text-xs font-mono-num text-amber-300 select-all focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleCopyDomain}
+                      className="flex items-center gap-1 px-2.5 py-1.5 rounded bg-[#1d2734] hover:bg-[#283547] text-xs font-medium text-stone-200 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                    >
+                      {copiedDomain ? (
+                        <>
+                          <Check className="w-3.5 h-3.5 text-emerald-400" />
+                          <span className="text-emerald-300">{t.multiplayer.copied}</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3.5 h-3.5" />
+                          <span>{t.multiplayer.copyDomain}</span>
+                        </>
+                      )}
+                    </button>
+                    <a
+                      href={firebaseAuthConsoleUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center gap-1 px-2.5 py-1.5 rounded bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/35 text-xs font-medium text-amber-300 transition-colors whitespace-nowrap shrink-0"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      <span>{t.multiplayer.openFirebaseAuth}</span>
+                    </a>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
