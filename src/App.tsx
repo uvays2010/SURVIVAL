@@ -190,9 +190,11 @@ export default function App() {
         setMpRoomId(room);
         setMpSelfId(selfId);
       },
+      onPlayersFrame: (players) => {
+        engineRef.current?.setRemotePlayers(players);
+      },
       onPlayersChange: (players) => {
         setRemotePlayers(players);
-        engineRef.current?.setRemotePlayers(players);
       },
       onChatMessage: (msg) => {
         setMpMessages((prev) => {

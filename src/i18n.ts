@@ -198,6 +198,7 @@ export interface TranslationBundle {
     chatPlaceholder: string;
     send: string;
     noMessages: string;
+    inviteHint: string;
   };
   webglErrorFallback: string;
 }
@@ -489,6 +490,7 @@ export const TRANSLATIONS: Record<GameLang, TranslationBundle> = {
       chatPlaceholder: 'Xabar yozing...',
       send: 'Yuborish',
       noMessages: 'Hali xabarlar yo‘q',
+      inviteHint: 'Do‘stlar bilan o‘ynash uchun ikkalangiz ham ulashilgan havola va bir xil xona kodi bilan kiring.',
     },
     webglErrorFallback: 'Ushbu qurilmada 3D WebGL grafikasi ishga tushmadi.',
   },
@@ -778,6 +780,7 @@ export const TRANSLATIONS: Record<GameLang, TranslationBundle> = {
       chatPlaceholder: 'Написать сообщение...',
       send: 'Отправить',
       noMessages: 'Сообщений пока нет',
+      inviteHint: 'Чтобы играть вместе, откройте общую ссылку на обоих устройствах и введите один код комнаты.',
     },
     webglErrorFallback: 'WebGL графика недоступна на этом устройстве.',
   },
@@ -1067,6 +1070,7 @@ export const TRANSLATIONS: Record<GameLang, TranslationBundle> = {
       chatPlaceholder: 'Type a message...',
       send: 'Send',
       noMessages: 'No messages yet',
+      inviteHint: 'To play together, open the shared app link on both devices using the same room code.',
     },
     webglErrorFallback: 'WebGL context unavailable on this device.',
   },

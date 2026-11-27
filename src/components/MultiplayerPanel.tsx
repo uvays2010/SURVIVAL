@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Check, Copy, MapPin, Send, Users, Wifi, WifiOff, X } from 'lucide-react';
 import {
+  buildShareableRoomUrl,
   ConnectionStatus,
   MultiplayerChatMessage,
   PLAYER_PALETTE,
@@ -48,7 +49,9 @@ export const MultiplayerPanel: React.FC<MultiplayerPanelProps> = ({
   const [roomInput, setRoomInput] = useState(roomId);
   const [chatInput, setChatInput] = useState('');
   const [copied, setCopied] = useState(false);
+  const [showInviteUrl, setShowInviteUrl] = useState(false);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
+  const shareUrl = buildShareableRoomUrl(roomId);
 
   useEffect(() => {
     setNameInput(playerName);
@@ -76,14 +79,13 @@ export const MultiplayerPanel: React.FC<MultiplayerPanelProps> = ({
       : t.multiplayer.connecting;
 
   const handleCopyInvite = async () => {
+    setShowInviteUrl(true);
     try {
-      const url = new URL(window.location.href);
-      url.searchParams.set('room', roomId);
-      await navigator.clipboard.writeText(url.toString());
+      await navigator.clipboard.writeText(shareUrl);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1800);
     } catch {
-      // Clipboard fallback ignored if blocked by browser permissions
+      // Fallback read-only link box stays visible for manual copy
     }
   };
 
@@ -213,6 +215,19 @@ export const MultiplayerPanel: React.FC<MultiplayerPanelProps> = ({
               </div>
             </form>
           </div>
+
+          {showInviteUrl && (
+            <div className="flex flex-col gap-1 rounded-lg bg-[#0a0e13] border border-white/10 p-2.5">
+              <input
+                type="text"
+                readOnly
+                value={shareUrl}
+                onFocus={(e) => e.target.select()}
+                className="w-full px-2.5 py-1.5 rounded bg-[#141b24] border border-white/12 text-xs font-mono-num text-amber-300 select-all focus:outline-none"
+              />
+              <span className="text-[11px] text-stone-400">{t.multiplayer.inviteHint}</span>
+            </div>
+          )}
 
           {/* Connected Players + Room Chat */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 border-t border-white/10 pt-3">
