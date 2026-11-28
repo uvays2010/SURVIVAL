@@ -172,6 +172,162 @@
         "text",
         "createdAt"
       ]
+    },
+    "RoomWorld": {
+      "title": "RoomWorld",
+      "description": "Shared room environment (weather, time-of-day, campfire) and host-synced enemy states per map.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "enum": [
+            "lost_valley",
+            "alpine_glacier",
+            "emerald_archipelago",
+            "saffron_canyon",
+            "misty_wetlands",
+            "crimson_caldera",
+            "twin_fjords",
+            "highland_meadows"
+          ]
+        },
+        "roomId": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 20,
+          "pattern": "^[a-z0-9_-]+$"
+        },
+        "mapId": {
+          "type": "string",
+          "enum": [
+            "lost_valley",
+            "alpine_glacier",
+            "emerald_archipelago",
+            "saffron_canyon",
+            "misty_wetlands",
+            "crimson_caldera",
+            "twin_fjords",
+            "highland_meadows"
+          ]
+        },
+        "weatherMode": {
+          "type": "string",
+          "enum": ["DYNAMIC", "CLEAR", "FOGGY", "RAIN", "STORM", "SNOW"]
+        },
+        "timeAnchorHours": { "type": "number" },
+        "timeAnchorMs": { "type": "number" },
+        "timePaused": { "type": "boolean" },
+        "campfireLit": { "type": "boolean" },
+        "hostSessionId": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "enemies": {
+          "type": "array"
+        },
+        "updatedByUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "roomId",
+        "mapId",
+        "weatherMode",
+        "timeAnchorHours",
+        "timeAnchorMs",
+        "timePaused",
+        "campfireLit",
+        "hostSessionId",
+        "enemies",
+        "updatedByUid",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "RoomEnemyHit": {
+      "title": "RoomEnemyHit",
+      "description": "Co-op melee hit event sent by a player to the authoritative host for shared enemy damage.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "ownerUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "roomId": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 20,
+          "pattern": "^[a-z0-9_-]+$"
+        },
+        "mapId": {
+          "type": "string",
+          "enum": [
+            "lost_valley",
+            "alpine_glacier",
+            "emerald_archipelago",
+            "saffron_canyon",
+            "misty_wetlands",
+            "crimson_caldera",
+            "twin_fjords",
+            "highland_meadows"
+          ]
+        },
+        "enemyId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 48,
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "attackerId": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "damage": { "type": "number" },
+        "dirX": { "type": "number" },
+        "dirZ": { "type": "number" },
+        "heavy": { "type": "boolean" },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerUid",
+        "roomId",
+        "mapId",
+        "enemyId",
+        "attackerId",
+        "damage",
+        "dirX",
+        "dirZ",
+        "heavy",
+        "createdAt"
+      ]
     }
   },
   "firestore": {
@@ -186,6 +342,14 @@
     "/rooms/{roomId}/messages/{messageId}": {
       "schema": { "$ref": "#/entities/RoomMessage" },
       "description": "Co-op room chat messages."
+    },
+    "/rooms/{roomId}/worlds/{mapId}": {
+      "schema": { "$ref": "#/entities/RoomWorld" },
+      "description": "Shared weather, time, campfire, and enemy states per map inside a room."
+    },
+    "/rooms/{roomId}/hits/{hitId}": {
+      "schema": { "$ref": "#/entities/RoomEnemyHit" },
+      "description": "Co-op melee hit events targeting shared enemies in a room."
     }
   }
 }

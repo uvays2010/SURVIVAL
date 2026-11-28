@@ -22,7 +22,8 @@ import {
   signOutFirebase,
   type User,
 } from '../firebase';
-import { WorldMapId } from './types';
+import { getWorldMapDef, WeatherMode, WorldMapId } from './types';
+import type { EnemyAiState, EnemyNetItem } from './enemies';
 
 export interface RemotePlayerState {
   id: string;
@@ -73,6 +74,29 @@ export interface MultiplayerChatMessage {
   colorIdx: number;
   text: string;
   ts: number;
+}
+
+export interface RoomWorldState {
+  mapId: WorldMapId;
+  weatherMode: WeatherMode;
+  timeAnchorHours: number;
+  timeAnchorMs: number;
+  timePaused: boolean;
+  campfireLit: boolean;
+  hostSessionId: string;
+  enemies: EnemyNetItem[];
+  serverNowMs: number;
+}
+
+export interface RoomEnemyHitEvent {
+  id: string;
+  mapId: WorldMapId;
+  enemyId: string;
+  attackerId: string;
+  damage: number;
+  dirX: number;
+  dirZ: number;
+  heavy: boolean;
 }
 
 export type ConnectionStatus = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
@@ -206,6 +230,54 @@ export function buildShareableRoomUrl(roomId: string): string {
   return url.toString();
 }
 
+const VALID_WEATHER_MODES: ReadonlySet<WeatherMode> = new Set<WeatherMode>([
+  'DYNAMIC',
+  'CLEAR',
+  'FOGGY',
+  'RAIN',
+  'STORM',
+  'SNOW',
+]);
+
+const VALID_ENEMY_STATES: ReadonlySet<EnemyAiState> = new Set<EnemyAiState>([
+  'patrol',
+  'chase',
+  'windup',
+  'recover',
+  'dead',
+]);
+
+function sanitizeWeatherMode(raw: unknown): WeatherMode {
+  return typeof raw === 'string' && VALID_WEATHER_MODES.has(raw as WeatherMode)
+    ? (raw as WeatherMode)
+    : 'DYNAMIC';
+}
+
+function sanitizeEnemyItems(raw: unknown): EnemyNetItem[] {
+  if (!Array.isArray(raw)) return [];
+  const out: EnemyNetItem[] = [];
+  for (let i = 0; i < Math.min(24, raw.length); i++) {
+    const item = raw[i] as Record<string, unknown> | null;
+    if (!item || typeof item !== 'object') continue;
+    const id = typeof item.id === 'string' ? item.id.slice(0, 48) : '';
+    if (!id) continue;
+    const st = typeof item.st === 'string' && VALID_ENEMY_STATES.has(item.st as EnemyAiState)
+      ? (item.st as EnemyAiState)
+      : 'patrol';
+    out.push({
+      id,
+      x: round2(clampNum(Number(item.x), -499, 499)),
+      z: round2(clampNum(Number(item.z), -499, 499)),
+      yaw: normalizeYaw(Number(item.yaw)),
+      hp: Math.round(clampNum(Number(item.hp), 0, 2000)),
+      st,
+      sp: round2(clampNum(Number(item.sp), 0, 39)),
+      tm: round2(clampNum(Number(item.tm), 0, 120)),
+    });
+  }
+  return out;
+}
+
 export interface MultiplayerCallbacks {
   onStatusChange: (
     status: ConnectionStatus,
@@ -218,6 +290,9 @@ export interface MultiplayerCallbacks {
   onPlayersChange: (players: RemotePlayerState[]) => void;
   onChatMessagesReplace?: (messages: MultiplayerChatMessage[]) => void;
   onChatMessage: (msg: MultiplayerChatMessage) => void;
+  onWorldStateUpdate?: (world: RoomWorldState) => void;
+  onEnemyHitReceived?: (hit: RoomEnemyHitEvent) => void;
+  onServerClockOffset?: (offsetMs: number) => void;
   onFirestoreError?: (err: Error) => void;
 }
 
@@ -235,6 +310,8 @@ export class MultiplayerClient {
   private authUnsub: Unsubscribe | null = null;
   private playersUnsub: Unsubscribe | null = null;
   private messagesUnsub: Unsubscribe | null = null;
+  private worldUnsub: Unsubscribe | null = null;
+  private hitsUnsub: Unsubscribe | null = null;
   private cloudHeartbeatTimer: number | null = null;
   private cloudPruneTimer: number | null = null;
   private currentUser: User | null = null;
@@ -245,6 +322,23 @@ export class MultiplayerClient {
   private cloudWriteInFlight = false;
   private cloudDirtyPending = false;
   private serverTimeOffsetMs = 0;
+
+  // Room World (Weather/Time/Campfire + Co-op Enemies) state
+  private activeMapId: WorldMapId;
+  private worldDocExists = false;
+  private worldWriteInFlight = false;
+  private pendingEnemiesSnapshot: { mapId: WorldMapId; enemies: EnemyNetItem[] } | null = null;
+  private lastEnemiesSentAt = 0;
+  private localWorlds = new Map<WorldMapId, RoomWorldState>();
+  private processedHitIds = new Set<string>();
+  private lastHitTs = 0;
+  private latestEnv: {
+    weatherMode: WeatherMode;
+    timeAnchorHours: number;
+    timeAnchorMs: number;
+    timePaused: boolean;
+    campfireLit: boolean;
+  };
 
   private roomId: string;
   private playerName: string;
@@ -267,6 +361,15 @@ export class MultiplayerClient {
     this.roomId = sanitizeRoomId(initialRoomId);
     this.playerName = sanitizePlayerName(initialName);
     this.latestLocalState = { ...initialState };
+    this.activeMapId = sanitizeMapId(initialState.mapId);
+    const mapDef = getWorldMapDef(this.activeMapId);
+    this.latestEnv = {
+      weatherMode: mapDef.defaultWeather,
+      timeAnchorHours: mapDef.defaultTimeHours,
+      timeAnchorMs: Date.now(),
+      timePaused: false,
+      campfireLit: true,
+    };
     this.callbacks = callbacks;
     this.cloudSessionId = getOrCreateSessionId();
     this.cloudColorIdx = hashColorIdx(this.cloudSessionId);
@@ -353,6 +456,10 @@ export class MultiplayerClient {
   private teardownCloud(): void {
     this.cloudJoinSeq++;
     this.cloudPlayerDocCreated = false;
+    this.worldDocExists = false;
+    this.worldWriteInFlight = false;
+    this.pendingEnemiesSnapshot = null;
+    this.processedHitIds.clear();
     if (this.playersUnsub) {
       this.playersUnsub();
       this.playersUnsub = null;
@@ -360,6 +467,14 @@ export class MultiplayerClient {
     if (this.messagesUnsub) {
       this.messagesUnsub();
       this.messagesUnsub = null;
+    }
+    if (this.worldUnsub) {
+      this.worldUnsub();
+      this.worldUnsub = null;
+    }
+    if (this.hitsUnsub) {
+      this.hitsUnsub();
+      this.hitsUnsub = null;
     }
     if (this.cloudHeartbeatTimer !== null) {
       window.clearInterval(this.cloudHeartbeatTimer);
@@ -534,6 +649,7 @@ export class MultiplayerClient {
             const selfTs = selfData.updatedAt as Timestamp | null | undefined;
             if (selfTs && typeof selfTs.toMillis === 'function' && !docSnap.metadata.hasPendingWrites) {
               this.serverTimeOffsetMs = selfTs.toMillis() - localNow;
+              this.callbacks.onServerClockOffset?.(this.serverTimeOffsetMs);
             }
           }
         });
@@ -645,6 +761,12 @@ export class MultiplayerClient {
       }
     );
 
+    // 4B. Subscribe to shared room world state (weather, time, campfire & enemies) for activeMapId
+    this.subscribeCloudWorld(activeRoom, this.activeMapId, seq);
+
+    // 4C. Subscribe to co-op guest enemy hits inside this room
+    this.subscribeCloudHits(activeRoom, seq);
+
     // 5. Periodic heartbeat + local stale player pruner
     this.cloudHeartbeatTimer = window.setInterval(() => {
       void this.flushCloudState(true);
@@ -663,6 +785,114 @@ export class MultiplayerClient {
     }, 4500);
 
     this.callbacks.onStatusChange('connected', activeRoom, this.selfId, 'cloud');
+  }
+
+  private subscribeCloudWorld(activeRoom: string, targetMapId: WorldMapId, seq: number): void {
+    if (this.worldUnsub) {
+      this.worldUnsub();
+      this.worldUnsub = null;
+    }
+    this.worldDocExists = false;
+    const worldPath = `rooms/${activeRoom}/worlds/${targetMapId}`;
+    const worldRef = doc(db, 'rooms', activeRoom, 'worlds', targetMapId);
+    this.worldUnsub = onSnapshot(
+      worldRef,
+      (docSnap) => {
+        if (this.disposed || seq !== this.cloudJoinSeq || targetMapId !== this.activeMapId) return;
+        if (docSnap.metadata.hasPendingWrites) return;
+        if (!docSnap.exists()) {
+          this.worldDocExists = false;
+          return;
+        }
+        this.worldDocExists = true;
+        const d = docSnap.data() as Record<string, unknown>;
+        const weatherMode = sanitizeWeatherMode(d.weatherMode);
+        const timeAnchorHours = clampNum(Number(d.timeAnchorHours), 0, 24);
+        const timeAnchorMs = clampNum(Number(d.timeAnchorMs), 0, 99999999999999);
+        const timePaused = Boolean(d.timePaused);
+        const campfireLit = d.campfireLit !== undefined ? Boolean(d.campfireLit) : true;
+        const hostSessionId = typeof d.hostSessionId === 'string' ? d.hostSessionId : '';
+        const enemies = sanitizeEnemyItems(d.enemies);
+
+        this.latestEnv = {
+          weatherMode,
+          timeAnchorHours,
+          timeAnchorMs,
+          timePaused,
+          campfireLit,
+        };
+
+        this.callbacks.onWorldStateUpdate?.({
+          mapId: targetMapId,
+          weatherMode,
+          timeAnchorHours,
+          timeAnchorMs,
+          timePaused,
+          campfireLit,
+          hostSessionId,
+          enemies,
+          serverNowMs: Date.now() + this.serverTimeOffsetMs,
+        });
+      },
+      (error) => {
+        this.reportCloudError(error, OperationType.GET, worldPath);
+      }
+    );
+  }
+
+  private subscribeCloudHits(activeRoom: string, seq: number): void {
+    if (this.hitsUnsub) {
+      this.hitsUnsub();
+      this.hitsUnsub = null;
+    }
+    const hitsPath = `rooms/${activeRoom}/hits`;
+    const hitsQ = query(
+      collection(db, 'rooms', activeRoom, 'hits'),
+      where('roomId', '==', activeRoom)
+    );
+    this.hitsUnsub = onSnapshot(
+      hitsQ,
+      (snapshot) => {
+        if (this.disposed || seq !== this.cloudJoinSeq) return;
+        const nowMs = Date.now() + this.serverTimeOffsetMs;
+        for (const change of snapshot.docChanges()) {
+          if (change.type !== 'added') continue;
+          const id = change.doc.id;
+          if (this.processedHitIds.has(id)) continue;
+          this.processedHitIds.add(id);
+          if (this.processedHitIds.size > 240) {
+            const first = this.processedHitIds.values().next().value;
+            if (first !== undefined) this.processedHitIds.delete(first);
+          }
+
+          const d = change.doc.data() as Record<string, unknown>;
+          if (d.attackerId === this.cloudSessionId) continue;
+          const mapId = sanitizeMapId(d.mapId as WorldMapId);
+          if (mapId !== this.activeMapId) continue;
+
+          const tsObj = d.createdAt as Timestamp | null | undefined;
+          const createdMs =
+            tsObj && typeof tsObj.toMillis === 'function' ? tsObj.toMillis() : nowMs;
+          if (nowMs - createdMs > 12000) continue;
+
+          const enemyId = typeof d.enemyId === 'string' ? d.enemyId : '';
+          if (!enemyId) continue;
+          this.callbacks.onEnemyHitReceived?.({
+            id,
+            mapId,
+            enemyId,
+            attackerId: typeof d.attackerId === 'string' ? d.attackerId : '',
+            damage: Math.round(clampNum(Number(d.damage), 1, 200)),
+            dirX: clampNum(Number(d.dirX), -2, 2),
+            dirZ: clampNum(Number(d.dirZ), -2, 2),
+            heavy: Boolean(d.heavy),
+          });
+        }
+      },
+      (error) => {
+        this.reportCloudError(error, OperationType.LIST, hitsPath);
+      }
+    );
   }
 
   private async flushCloudState(force = false): Promise<void> {
@@ -820,6 +1050,12 @@ export class MultiplayerClient {
           this.selfId = nextSelfId;
           this.roomId = nextRoomId;
           this.players.clear();
+          this.localWorlds.clear();
+
+          if (typeof data.serverNowMs === 'number') {
+            this.serverTimeOffsetMs = data.serverNowMs - Date.now();
+            this.callbacks.onServerClockOffset?.(this.serverTimeOffsetMs);
+          }
 
           if (Array.isArray(data.players)) {
             for (const item of data.players) {
@@ -837,6 +1073,9 @@ export class MultiplayerClient {
                 this.callbacks.onChatMessage(m);
               }
             }
+          }
+          if (Array.isArray(data.worlds)) {
+            this.applyLocalWorldsSnapshot(data.worlds, Number(data.serverNowMs || Date.now()));
           }
           this.callbacks.onStatusChange('connected', this.roomId, this.selfId, 'local');
           this.emitPlayers(true);
@@ -865,6 +1104,36 @@ export class MultiplayerClient {
           const id = typeof data.id === 'string' ? data.id : '';
           if (id && this.players.delete(id)) {
             this.emitPlayers(true);
+          }
+          return;
+        }
+
+        if (type === 'world:state') {
+          const srvNow = typeof data.serverNowMs === 'number' ? data.serverNowMs : Date.now();
+          this.serverTimeOffsetMs = srvNow - Date.now();
+          this.callbacks.onServerClockOffset?.(this.serverTimeOffsetMs);
+          if (data.world && typeof data.world === 'object') {
+            this.applyLocalWorldsSnapshot([data.world], srvNow);
+          }
+          return;
+        }
+
+        if (type === 'enemy:hit') {
+          const hit = data.hit as Record<string, unknown> | undefined;
+          if (hit && typeof hit.enemyId === 'string' && hit.attackerId !== this.selfId) {
+            const mapId = sanitizeMapId(hit.mapId as WorldMapId);
+            if (mapId === this.activeMapId) {
+              this.callbacks.onEnemyHitReceived?.({
+                id: typeof hit.id === 'string' ? hit.id : String(Date.now()),
+                mapId,
+                enemyId: hit.enemyId,
+                attackerId: typeof hit.attackerId === 'string' ? hit.attackerId : '',
+                damage: Math.round(clampNum(Number(hit.damage), 1, 200)),
+                dirX: clampNum(Number(hit.dirX), -2, 2),
+                dirZ: clampNum(Number(hit.dirZ), -2, 2),
+                heavy: Boolean(hit.heavy),
+              });
+            }
           }
           return;
         }
@@ -951,12 +1220,25 @@ export class MultiplayerClient {
         roomId?: string;
         players?: RemotePlayerState[];
         messages?: MultiplayerChatMessage[];
+        worlds?: unknown[];
+        serverNowMs?: number;
       };
 
       if (data.ok && data.selfId) {
         this.selfId = data.selfId;
         this.roomId = data.roomId || this.roomId;
-        this.applyHttpSnapshot(data.players || [], data.messages || [], true);
+        if (typeof data.serverNowMs === 'number') {
+          this.serverTimeOffsetMs = data.serverNowMs - Date.now();
+          this.callbacks.onServerClockOffset?.(this.serverTimeOffsetMs);
+        }
+        this.applyHttpSnapshot(
+          data.players || [],
+          data.messages || [],
+          true,
+          data.worlds,
+          undefined,
+          data.serverNowMs
+        );
         this.callbacks.onStatusChange('connected', this.roomId, this.selfId, 'local');
 
         this.httpSyncTimer = window.setInterval(() => {
@@ -996,6 +1278,7 @@ export class MultiplayerClient {
           roomId: this.roomId,
           playerId: this.selfId,
           sinceTs: this.lastChatTs,
+          sinceHitTs: this.lastHitTs,
           state: this.latestLocalState,
         }),
       });
@@ -1009,9 +1292,23 @@ export class MultiplayerClient {
         ok?: boolean;
         players?: RemotePlayerState[];
         messages?: MultiplayerChatMessage[];
+        worlds?: unknown[];
+        hits?: unknown[];
+        serverNowMs?: number;
       };
       if (data.ok) {
-        this.applyHttpSnapshot(data.players || [], data.messages || [], false);
+        if (typeof data.serverNowMs === 'number') {
+          this.serverTimeOffsetMs = data.serverNowMs - Date.now();
+          this.callbacks.onServerClockOffset?.(this.serverTimeOffsetMs);
+        }
+        this.applyHttpSnapshot(
+          data.players || [],
+          data.messages || [],
+          false,
+          data.worlds,
+          data.hits,
+          data.serverNowMs
+        );
       }
     } catch {
       this.callbacks.onStatusChange('reconnecting', this.roomId, this.selfId, 'local');
@@ -1023,7 +1320,10 @@ export class MultiplayerClient {
   private applyHttpSnapshot(
     list: RemotePlayerState[],
     messages: MultiplayerChatMessage[],
-    forceUi: boolean
+    forceUi: boolean,
+    worlds?: unknown[],
+    hits?: unknown[],
+    serverNowMs?: number
   ): void {
     const prevIds = new Set(this.players.keys());
     const nextIds = new Set<string>();
@@ -1045,7 +1345,66 @@ export class MultiplayerClient {
       this.callbacks.onChatMessage(m);
     }
 
+    if (Array.isArray(worlds)) {
+      this.applyLocalWorldsSnapshot(worlds, serverNowMs ?? Date.now());
+    }
+
+    if (Array.isArray(hits)) {
+      for (const rawHit of hits) {
+        const hit = rawHit as Record<string, unknown>;
+        if (!hit || typeof hit.enemyId !== 'string') continue;
+        const ts = typeof hit.ts === 'number' ? hit.ts : 0;
+        if (ts > this.lastHitTs) this.lastHitTs = ts;
+        const id = typeof hit.id === 'string' ? hit.id : `${hit.enemyId}_${ts}`;
+        if (this.processedHitIds.has(id)) continue;
+        this.processedHitIds.add(id);
+        const mapId = sanitizeMapId(hit.mapId as WorldMapId);
+        if (mapId === this.activeMapId && hit.attackerId !== this.selfId) {
+          this.callbacks.onEnemyHitReceived?.({
+            id,
+            mapId,
+            enemyId: hit.enemyId,
+            attackerId: typeof hit.attackerId === 'string' ? hit.attackerId : '',
+            damage: Math.round(clampNum(Number(hit.damage), 1, 200)),
+            dirX: clampNum(Number(hit.dirX), -2, 2),
+            dirZ: clampNum(Number(hit.dirZ), -2, 2),
+            heavy: Boolean(hit.heavy),
+          });
+        }
+      }
+    }
+
     this.emitPlayers(structureChanged);
+  }
+
+  private applyLocalWorldsSnapshot(rawWorlds: unknown[], serverNowMs: number): void {
+    for (const item of rawWorlds) {
+      const d = item as Record<string, unknown>;
+      if (!d || typeof d !== 'object') continue;
+      const mapId = sanitizeMapId(d.mapId as WorldMapId);
+      const parsed: RoomWorldState = {
+        mapId,
+        weatherMode: sanitizeWeatherMode(d.weatherMode),
+        timeAnchorHours: clampNum(Number(d.timeAnchorHours), 0, 24),
+        timeAnchorMs: clampNum(Number(d.timeAnchorMs), 0, 99999999999999),
+        timePaused: Boolean(d.timePaused),
+        campfireLit: d.campfireLit !== undefined ? Boolean(d.campfireLit) : true,
+        hostSessionId: typeof d.hostSessionId === 'string' ? d.hostSessionId : '',
+        enemies: sanitizeEnemyItems(d.enemies),
+        serverNowMs,
+      };
+      this.localWorlds.set(mapId, parsed);
+      if (mapId === this.activeMapId) {
+        this.latestEnv = {
+          weatherMode: parsed.weatherMode,
+          timeAnchorHours: parsed.timeAnchorHours,
+          timeAnchorMs: parsed.timeAnchorMs,
+          timePaused: parsed.timePaused,
+          campfireLit: parsed.campfireLit,
+        };
+        this.callbacks.onWorldStateUpdate?.(parsed);
+      }
+    }
   }
 
   private sendWsRaw(payload: unknown): void {
@@ -1068,6 +1427,348 @@ export class MultiplayerClient {
     return Array.from(this.players.values());
   }
 
+  public getServerNowMs(): number {
+    return Date.now() + this.serverTimeOffsetMs;
+  }
+
+  public isMapHost(): boolean {
+    const myId = this.selfId;
+    if (!myId) return true;
+    for (const p of this.players.values()) {
+      if (p.mapId === this.activeMapId && p.id < myId) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  public hasSameMapTeammates(): boolean {
+    for (const p of this.players.values()) {
+      if (p.mapId === this.activeMapId) return true;
+    }
+    return false;
+  }
+
+  public setActiveMapId(mapId: WorldMapId): void {
+    const clean = sanitizeMapId(mapId);
+    if (this.activeMapId === clean) return;
+    this.activeMapId = clean;
+    const def = getWorldMapDef(clean);
+    this.latestEnv = {
+      weatherMode: def.defaultWeather,
+      timeAnchorHours: def.defaultTimeHours,
+      timeAnchorMs: this.getServerNowMs(),
+      timePaused: false,
+      campfireLit: true,
+    };
+    this.pendingEnemiesSnapshot = null;
+
+    if (this.mode === 'cloud' && this.currentUser) {
+      this.subscribeCloudWorld(this.roomId, clean, this.cloudJoinSeq);
+    } else {
+      const existing = this.localWorlds.get(clean);
+      if (existing) {
+        this.callbacks.onWorldStateUpdate?.(existing);
+      }
+    }
+  }
+
+  public pushRoomEnvUpdate(
+    partial: {
+      weatherMode?: WeatherMode;
+      timeAnchorHours?: number;
+      timeAnchorMs?: number;
+      timePaused?: boolean;
+      campfireLit?: boolean;
+    },
+    initialEnemies?: EnemyNetItem[]
+  ): void {
+    this.latestEnv = {
+      ...this.latestEnv,
+      ...partial,
+      weatherMode: partial.weatherMode ? sanitizeWeatherMode(partial.weatherMode) : this.latestEnv.weatherMode,
+      timeAnchorHours:
+        partial.timeAnchorHours !== undefined
+          ? clampNum(partial.timeAnchorHours, 0, 24)
+          : this.latestEnv.timeAnchorHours,
+      timeAnchorMs:
+        partial.timeAnchorMs !== undefined
+          ? Math.round(clampNum(partial.timeAnchorMs, 0, 99999999999999))
+          : this.latestEnv.timeAnchorMs,
+    };
+
+    const targetMapId = this.activeMapId;
+    if (this.mode === 'cloud' && this.currentUser) {
+      void this.writeCloudEnv(targetMapId, initialEnemies);
+      return;
+    }
+
+    if (this.mode === 'ws') {
+      this.sendWsRaw({
+        type: 'world:env',
+        mapId: targetMapId,
+        ...this.latestEnv,
+      });
+    } else if (this.mode === 'http' && this.selfId) {
+      void fetch('/api/mp/world-env', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          roomId: this.roomId,
+          playerId: this.selfId,
+          mapId: targetMapId,
+          ...this.latestEnv,
+        }),
+      }).catch(() => {});
+    }
+  }
+
+  private async writeCloudEnv(
+    targetMapId: WorldMapId,
+    initialEnemies?: EnemyNetItem[]
+  ): Promise<void> {
+    const user = this.currentUser;
+    if (this.disposed || !user || this.mode !== 'cloud') return;
+    const worldPath = `rooms/${this.roomId}/worlds/${targetMapId}`;
+    const worldRef = doc(db, 'rooms', this.roomId, 'worlds', targetMapId);
+
+    const envFields = {
+      weatherMode: this.latestEnv.weatherMode,
+      timeAnchorHours: round2(clampNum(this.latestEnv.timeAnchorHours, 0, 24)),
+      timeAnchorMs: Math.round(clampNum(this.latestEnv.timeAnchorMs, 0, 99999999999999)),
+      timePaused: Boolean(this.latestEnv.timePaused),
+      campfireLit: Boolean(this.latestEnv.campfireLit),
+      updatedByUid: user.uid,
+      updatedAt: serverTimestamp(),
+    };
+
+    try {
+      if (!this.worldDocExists) {
+        try {
+          await setDoc(worldRef, {
+            id: targetMapId,
+            roomId: this.roomId,
+            mapId: targetMapId,
+            ...envFields,
+            hostSessionId: this.cloudSessionId,
+            enemies: sanitizeEnemyItems(initialEnemies ?? []),
+            createdAt: serverTimestamp(),
+          });
+          this.worldDocExists = true;
+          return;
+        } catch {
+          // Document may have just been created by a teammate; fall back to updateDoc
+          await updateDoc(worldRef, envFields);
+          this.worldDocExists = true;
+          return;
+        }
+      }
+      await updateDoc(worldRef, envFields);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('No document to update') || msg.includes('NOT_FOUND')) {
+        try {
+          await setDoc(worldRef, {
+            id: targetMapId,
+            roomId: this.roomId,
+            mapId: targetMapId,
+            ...envFields,
+            hostSessionId: this.cloudSessionId,
+            enemies: sanitizeEnemyItems(initialEnemies ?? []),
+            createdAt: serverTimestamp(),
+          });
+          this.worldDocExists = true;
+        } catch (retryErr) {
+          this.reportCloudError(retryErr, OperationType.WRITE, worldPath);
+        }
+      } else {
+        this.reportCloudError(err, OperationType.UPDATE, worldPath);
+      }
+    }
+  }
+
+  public pushRoomEnemiesSnapshot(enemies: EnemyNetItem[], force = false): void {
+    if (this.disposed || !this.isMapHost()) return;
+    const now = performance.now();
+    const safeEnemies = sanitizeEnemyItems(enemies);
+
+    if (this.mode === 'cloud' && this.currentUser) {
+      const minInterval = force ? 160 : 240;
+      if (this.worldWriteInFlight || now - this.lastEnemiesSentAt < minInterval) {
+        if (force) {
+          this.pendingEnemiesSnapshot = { mapId: this.activeMapId, enemies: safeEnemies };
+        }
+        return;
+      }
+      void this.flushCloudEnemies(this.activeMapId, safeEnemies);
+      return;
+    }
+
+    if (this.mode === 'ws') {
+      if (!force && now - this.lastEnemiesSentAt < 120) return;
+      this.lastEnemiesSentAt = now;
+      this.sendWsRaw({
+        type: 'world:enemies',
+        mapId: this.activeMapId,
+        enemies: safeEnemies,
+      });
+    } else if (this.mode === 'http' && this.selfId) {
+      if (!force && now - this.lastEnemiesSentAt < 220) return;
+      this.lastEnemiesSentAt = now;
+      void fetch('/api/mp/world-enemies', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          roomId: this.roomId,
+          playerId: this.selfId,
+          mapId: this.activeMapId,
+          enemies: safeEnemies,
+        }),
+      }).catch(() => {});
+    }
+  }
+
+  private async flushCloudEnemies(targetMapId: WorldMapId, enemies: EnemyNetItem[]): Promise<void> {
+    const user = this.currentUser;
+    if (this.disposed || !user || this.mode !== 'cloud') return;
+    this.worldWriteInFlight = true;
+    this.lastEnemiesSentAt = performance.now();
+
+    const worldPath = `rooms/${this.roomId}/worlds/${targetMapId}`;
+    const worldRef = doc(db, 'rooms', this.roomId, 'worlds', targetMapId);
+    const enemyFields = {
+      hostSessionId: this.cloudSessionId,
+      enemies,
+      updatedByUid: user.uid,
+      updatedAt: serverTimestamp(),
+    };
+
+    try {
+      if (!this.worldDocExists) {
+        try {
+          await setDoc(worldRef, {
+            id: targetMapId,
+            roomId: this.roomId,
+            mapId: targetMapId,
+            weatherMode: this.latestEnv.weatherMode,
+            timeAnchorHours: round2(clampNum(this.latestEnv.timeAnchorHours, 0, 24)),
+            timeAnchorMs: Math.round(clampNum(this.latestEnv.timeAnchorMs, 0, 99999999999999)),
+            timePaused: Boolean(this.latestEnv.timePaused),
+            campfireLit: Boolean(this.latestEnv.campfireLit),
+            ...enemyFields,
+            createdAt: serverTimestamp(),
+          });
+          this.worldDocExists = true;
+        } catch {
+          await updateDoc(worldRef, enemyFields);
+          this.worldDocExists = true;
+        }
+      } else {
+        await updateDoc(worldRef, enemyFields);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('No document to update') || msg.includes('NOT_FOUND')) {
+        try {
+          await setDoc(worldRef, {
+            id: targetMapId,
+            roomId: this.roomId,
+            mapId: targetMapId,
+            weatherMode: this.latestEnv.weatherMode,
+            timeAnchorHours: round2(clampNum(this.latestEnv.timeAnchorHours, 0, 24)),
+            timeAnchorMs: Math.round(clampNum(this.latestEnv.timeAnchorMs, 0, 99999999999999)),
+            timePaused: Boolean(this.latestEnv.timePaused),
+            campfireLit: Boolean(this.latestEnv.campfireLit),
+            ...enemyFields,
+            createdAt: serverTimestamp(),
+          });
+          this.worldDocExists = true;
+        } catch (retryErr) {
+          this.reportCloudError(retryErr, OperationType.WRITE, worldPath);
+        }
+      } else {
+        this.reportCloudError(err, OperationType.UPDATE, worldPath);
+      }
+    } finally {
+      this.worldWriteInFlight = false;
+      const queued = this.pendingEnemiesSnapshot;
+      if (queued && !this.disposed && this.mode === 'cloud' && queued.mapId === this.activeMapId && this.isMapHost()) {
+        this.pendingEnemiesSnapshot = null;
+        void this.flushCloudEnemies(queued.mapId, queued.enemies);
+      }
+    }
+  }
+
+  public sendEnemyHit(hit: {
+    enemyId: string;
+    damage: number;
+    dirX: number;
+    dirZ: number;
+    heavy: boolean;
+  }): void {
+    if (this.disposed) return;
+    const targetMapId = this.activeMapId;
+    const safeDmg = Math.round(clampNum(hit.damage, 1, 200));
+    const dirX = round2(clampNum(hit.dirX, -2, 2));
+    const dirZ = round2(clampNum(hit.dirZ, -2, 2));
+    const heavy = Boolean(hit.heavy);
+
+    if (this.mode === 'cloud' && this.currentUser) {
+      const hitId = `h_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+      const hitPath = `rooms/${this.roomId}/hits/${hitId}`;
+      const hitRef = doc(db, 'rooms', this.roomId, 'hits', hitId);
+      void setDoc(hitRef, {
+        id: hitId,
+        ownerUid: this.currentUser.uid,
+        roomId: this.roomId,
+        mapId: targetMapId,
+        enemyId: hit.enemyId.slice(0, 48),
+        attackerId: this.cloudSessionId,
+        damage: safeDmg,
+        dirX,
+        dirZ,
+        heavy,
+        createdAt: serverTimestamp(),
+      })
+        .then(() => {
+          window.setTimeout(() => {
+            void deleteDoc(hitRef).catch(() => {});
+          }, 7000);
+        })
+        .catch((err) => {
+          this.reportCloudError(err, OperationType.CREATE, hitPath);
+        });
+      return;
+    }
+
+    if (this.mode === 'ws') {
+      this.sendWsRaw({
+        type: 'enemy:hit',
+        mapId: targetMapId,
+        enemyId: hit.enemyId,
+        damage: safeDmg,
+        dirX,
+        dirZ,
+        heavy,
+      });
+    } else if (this.mode === 'http' && this.selfId) {
+      void fetch('/api/mp/enemy-hit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          roomId: this.roomId,
+          playerId: this.selfId,
+          mapId: targetMapId,
+          enemyId: hit.enemyId,
+          damage: safeDmg,
+          dirX,
+          dirZ,
+          heavy,
+        }),
+      }).catch(() => {});
+    }
+  }
+
   public pushLocalState(state: NetLocalPlayerState): void {
     this.latestLocalState = { ...state };
     if (this.mode === 'cloud') {
@@ -1077,7 +1778,7 @@ export class MultiplayerClient {
     if (this.mode !== 'ws' || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
     const now = performance.now();
-    const signature = `${state.mapId}:${Math.round(state.x * 10)}:${Math.round(state.y * 10)}:${Math.round(state.z * 10)}:${Math.round(state.yaw * 20)}:${state.crouch ? 1 : 0}:${state.sprint ? 1 : 0}:${state.swim ? 1 : 0}:${state.flashlight ? 1 : 0}:${state.attackTimer > 0 ? 1 : 0}:${state.dodge ? 1 : 0}:${state.guard ? 1 : 0}`;
+    const signature = `${state.mapId}:${Math.round(state.x * 8)}:${Math.round(state.y * 8)}:${Math.round(state.z * 8)}:${Math.round(state.yaw * 16)}:${Math.round(state.speed * 2)}:${state.crouch ? 1 : 0}:${state.sprint ? 1 : 0}:${state.swim ? 1 : 0}:${state.flashlight ? 1 : 0}:${state.attackTimer > 0 ? 1 : 0}:${state.dodge ? 1 : 0}:${state.guard ? 1 : 0}`;
     const urgent =
       state.attackTimer > 0 ||
       state.dodge ||
@@ -1120,7 +1821,9 @@ export class MultiplayerClient {
 
     this.roomId = targetRoom;
     this.lastChatTs = 0;
+    this.lastHitTs = 0;
     this.players.clear();
+    this.localWorlds.clear();
     this.emitPlayers(true);
 
     if (this.mode === 'cloud' && this.currentUser) {

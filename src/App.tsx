@@ -189,11 +189,30 @@ export default function App() {
       onLocalStateSync: (state) => {
         mpClientRef.current?.pushLocalState(state);
       },
+      onSyncedEnvChange: (env) => {
+        setWeatherMode(env.weatherMode);
+        setTimePaused(env.timePaused);
+      },
+      onRoomEnvPublish: (env, initialEnemies) => {
+        mpClientRef.current?.pushRoomEnvUpdate(env, initialEnemies);
+      },
+      onEnemyStatePublish: (enemies, force) => {
+        mpClientRef.current?.pushRoomEnemiesSnapshot(enemies, force);
+      },
+      onEnemyHitSend: (hit) => {
+        mpClientRef.current?.sendEnemyHit(hit);
+      },
       initialQuality: quality,
       initialSensitivity: lookSensitivity,
       initialMapId: activeMapId,
     });
     engineRef.current = engine;
+
+    const syncRoleToEngine = () => {
+      const mp = mpClientRef.current;
+      if (!mp) return;
+      engineRef.current?.setWorldRole(mp.isMapHost(), mp.hasSameMapTeammates());
+    };
 
     const mpClient = new MultiplayerClient(mpRoomId, mpName, engine.getLocalNetState(), {
       onStatusChange: (status, room, selfId, transport) => {
@@ -201,6 +220,7 @@ export default function App() {
         setMpRoomId(room);
         setMpSelfId(selfId);
         setMpTransport(transport);
+        syncRoleToEngine();
       },
       onAuthChange: (user) => {
         setMpAuthUser(user);
@@ -213,9 +233,20 @@ export default function App() {
       },
       onPlayersFrame: (players) => {
         engineRef.current?.setRemotePlayers(players);
+        syncRoleToEngine();
       },
       onPlayersChange: (players) => {
         setRemotePlayers(players);
+        syncRoleToEngine();
+      },
+      onServerClockOffset: (offsetMs) => {
+        engineRef.current?.setServerClockOffset(offsetMs);
+      },
+      onWorldStateUpdate: (world) => {
+        engineRef.current?.applyRemoteWorldState(world);
+      },
+      onEnemyHitReceived: (hit) => {
+        engineRef.current?.applyRemoteEnemyHit(hit);
       },
       onChatMessagesReplace: (messages) => {
         setMpMessages(messages);
@@ -372,6 +403,13 @@ export default function App() {
     }));
 
     await engineRef.current?.switchWorldMap(nextMapId);
+    if (mpClientRef.current) {
+      mpClientRef.current.setActiveMapId(nextMapId);
+      engineRef.current?.setWorldRole(
+        mpClientRef.current.isMapHost(),
+        mpClientRef.current.hasSameMapTeammates()
+      );
+    }
 
     if (enteredWorldRef.current) {
       setMapSwitchState((prev) =>

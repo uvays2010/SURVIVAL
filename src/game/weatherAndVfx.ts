@@ -21,6 +21,7 @@ export interface WeatherVfxSystem {
   weather: WeatherState;
   campfireLit: boolean;
   setWeatherMode: (mode: WeatherMode) => void;
+  setCampfireLit: (lit: boolean) => void;
   toggleCampfire: () => void;
   setCampfirePos: (pos: THREE.Vector3) => void;
   toggleAudio: () => boolean;
@@ -35,7 +36,8 @@ export interface WeatherVfxSystem {
     particleMult: number,
     inCave: number,
     treePositions: { x: number; y: number; z: number }[],
-    isSwimming: boolean
+    isSwimming: boolean,
+    sharedClockMs?: number
   ) => void;
   dispose: () => void;
 }
@@ -60,8 +62,8 @@ export function createWeatherAndVfxSystem(
   };
 
   let campfireLit = true;
-  let dynamicPhaseTimer = 26;
   let dynamicTarget: 'CLEAR' | 'FOGGY' | 'RAIN' | 'STORM' | 'SNOW' = 'CLEAR';
+  let lastStormBoltIdx = -1;
 
   // --- 1. EXTREME CAMPFIRE (Independent Tongues + Glow + Sparks + Smoke) ---
   const fireGroup = new THREE.Group();
@@ -399,6 +401,10 @@ export function createWeatherAndVfxSystem(
     }
   };
 
+  const setCampfireLit = (lit: boolean) => {
+    campfireLit = lit;
+  };
+
   const toggleCampfire = () => {
     campfireLit = !campfireLit;
   };
@@ -413,17 +419,17 @@ export function createWeatherAndVfxSystem(
     particleMult: number,
     inCave: number,
     treePositions: { x: number; y: number; z: number }[],
-    isSwimming: boolean
+    isSwimming: boolean,
+    sharedClockMs?: number
   ) => {
-    // Dynamic Weather State Machine
+    const clockMs = sharedClockMs ?? Date.now();
+    const sharedSec = clockMs / 1000;
+
+    // Deterministic Shared Dynamic Weather State Machine (identical across all online peers)
     if (weather.mode === 'DYNAMIC') {
-      dynamicPhaseTimer -= dt;
-      if (dynamicPhaseTimer <= 0) {
-        dynamicPhaseTimer = 28 + Math.random() * 24;
-        const cycle: ('CLEAR' | 'FOGGY' | 'RAIN' | 'STORM' | 'SNOW')[] = ['CLEAR', 'FOGGY', 'RAIN', 'STORM', 'CLEAR', 'SNOW'];
-        const curIdx = cycle.indexOf(dynamicTarget);
-        dynamicTarget = cycle[(curIdx + 1) % cycle.length];
-      }
+      const cycle: ('CLEAR' | 'FOGGY' | 'RAIN' | 'STORM' | 'SNOW')[] = ['CLEAR', 'FOGGY', 'RAIN', 'STORM', 'CLEAR', 'SNOW'];
+      const slot = Math.floor(sharedSec / 38) % cycle.length;
+      dynamicTarget = cycle[slot];
     } else {
       dynamicTarget = weather.mode;
     }
@@ -433,7 +439,7 @@ export function createWeatherAndVfxSystem(
     const targetSnow = activeState === 'SNOW' ? 0.92 : playerPos.y > 23 ? 0.45 : 0.0;
     const targetFog = activeState === 'FOGGY' ? 2.4 : activeState === 'STORM' ? 1.75 : activeState === 'RAIN' ? 1.45 : activeState === 'SNOW' ? 1.6 : 1.0;
     const targetCloud = activeState === 'CLEAR' ? 0.34 : activeState === 'FOGGY' ? 0.68 : activeState === 'SNOW' ? 0.78 : 0.88;
-    const targetWind = activeState === 'STORM' ? 2.25 : activeState === 'RAIN' ? 1.45 : activeState === 'SNOW' ? 1.35 : 0.85 + Math.sin(elapsed * 0.14) * 0.3;
+    const targetWind = activeState === 'STORM' ? 2.25 : activeState === 'RAIN' ? 1.45 : activeState === 'SNOW' ? 1.35 : 0.85 + Math.sin(sharedSec * 0.14) * 0.3;
 
     // Gradual realistic transitions (never instant snap)
     weather.rainIntensity = THREE.MathUtils.damp(weather.rainIntensity, targetRain, 0.55, dt);
@@ -444,11 +450,19 @@ export function createWeatherAndVfxSystem(
     weather.cloudDensity = THREE.MathUtils.damp(weather.cloudDensity, targetCloud, 0.5, dt);
     weather.windStrength = THREE.MathUtils.damp(weather.windStrength, targetWind, 0.8, dt);
 
-    const windAngle = 0.58 + Math.sin(elapsed * 0.05) * 0.35;
+    const windAngle = 0.58 + Math.sin(sharedSec * 0.05) * 0.35;
     weather.windDir.set(Math.cos(windAngle), Math.sin(windAngle)).normalize();
 
-    if (activeState === 'STORM' && Math.random() < dt * 0.16) {
-      weather.lightningFlash = 1.0;
+    const boltIdx = Math.floor(sharedSec / 6.5);
+    if (activeState === 'STORM') {
+      if (boltIdx !== lastStormBoltIdx) {
+        lastStormBoltIdx = boltIdx;
+        if ((boltIdx * 7 + 3) % 5 < 3) {
+          weather.lightningFlash = 1.0;
+        }
+      }
+    } else {
+      lastStormBoltIdx = boltIdx;
     }
     weather.lightningFlash = THREE.MathUtils.damp(weather.lightningFlash, 0, 8, dt);
 
@@ -746,6 +760,7 @@ export function createWeatherAndVfxSystem(
       return campfireLit;
     },
     setWeatherMode,
+    setCampfireLit,
     toggleCampfire,
     setCampfirePos,
     toggleAudio,

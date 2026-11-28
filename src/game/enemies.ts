@@ -8,11 +8,29 @@ import {
   WorldMapId,
 } from './types';
 
+export type EnemyAiState = 'patrol' | 'chase' | 'windup' | 'recover' | 'dead';
+
+export interface EnemyNetItem {
+  id: string;
+  x: number;
+  z: number;
+  yaw: number;
+  hp: number;
+  st: EnemyAiState;
+  sp: number;
+  tm: number;
+}
+
 export interface EnemyMeleeHitInfo {
+  enemyId: string;
   hitPos: THREE.Vector3;
   isMech: boolean;
   killed: boolean;
   category: EnemyCategory;
+  damage: number;
+  dirX: number;
+  dirZ: number;
+  isHeavy: boolean;
 }
 
 export interface EnemyUpdateResult {
@@ -21,10 +39,23 @@ export interface EnemyUpdateResult {
   playerKnockDir: THREE.Vector3;
   bossShockwavePos: THREE.Vector3 | null;
   mechShockwavePos: THREE.Vector3 | null;
+  coopKilledCount: number;
 }
 
 export interface EnemySystem {
   root: THREE.Group;
+  setRemoteControlled: (remote: boolean) => void;
+  isRemoteControlled: () => boolean;
+  exportNetState: () => EnemyNetItem[];
+  applyNetState: (items: EnemyNetItem[], localPlayerPos: THREE.Vector3) => void;
+  applyRemoteHit: (
+    enemyId: string,
+    damage: number,
+    dirX: number,
+    dirZ: number,
+    isHeavy: boolean,
+    hostPlayerPos?: THREE.Vector3
+  ) => boolean;
   checkMeleeHit: (
     origin: THREE.Vector3,
     forwardDir: THREE.Vector3,
@@ -37,15 +68,14 @@ export interface EnemySystem {
     playerPos: THREE.Vector3,
     playerDodging: boolean,
     playerGuarding: boolean,
-    enteredWorld: boolean
+    enteredWorld: boolean,
+    allPlayerPositions?: THREE.Vector3[]
   ) => EnemyUpdateResult;
   getHudTarget: (playerPos: THREE.Vector3) => EnemyHudTarget | null;
   getMapMarkers: () => EnemyMapMarker[];
   getDefeatedCount: () => number;
   dispose: () => void;
 }
-
-type EnemyAiState = 'patrol' | 'chase' | 'windup' | 'recover' | 'dead';
 
 interface EnemyEntity {
   id: string;
@@ -95,6 +125,29 @@ interface EnemyEntity {
   knockVz: number;
   gaitPhase: number;
   pendingShockwave: boolean;
+  netTargetX: number;
+  netTargetZ: number;
+  netTargetYaw: number;
+  netVelX: number;
+  netVelZ: number;
+  netReceivedAt: number;
+  prevStateForFx: EnemyAiState;
+  hadNetState: boolean;
+}
+
+function lerpAngle(a: number, b: number, t: number): number {
+  let diff = ((b - a + Math.PI) % (Math.PI * 2)) - Math.PI;
+  if (diff < -Math.PI) diff += Math.PI * 2;
+  return a + diff * t;
+}
+
+function clampFinite(v: number, min: number, max: number): number {
+  if (!Number.isFinite(v)) return min;
+  return Math.min(max, Math.max(min, v));
+}
+
+function round2(v: number): number {
+  return Math.round(v * 100) / 100;
 }
 
 function drawHealthBarCanvas(
@@ -625,7 +678,10 @@ export function createEnemySystem(scene: THREE.Scene, mapId: WorldMapId): EnemyS
   const mapDef = getWorldMapDef(mapId);
   const rand = seededRandom(mapId.length * 919 + 42);
   const entities: EnemyEntity[] = [];
+  const entityById = new Map<string, EnemyEntity>();
   let defeatedCount = 0;
+  let remoteControlled = false;
+  let pendingCoopKills = 0;
 
   const isDryLand = (x: number, z: number, minClearance = 0.4): boolean => {
     const gy = groundHeightAt(x, z, mapId);
@@ -707,7 +763,8 @@ export function createEnemySystem(scene: THREE.Scene, mapId: WorldMapId): EnemyS
     drawHealthBarCanvas(rig.hpCanvas, st.hp, st.hp, category);
     rig.hpTex.needsUpdate = true;
 
-    entities.push({
+    const initYaw = rand() * Math.PI * 2;
+    const entity: EnemyEntity = {
       id,
       category,
       nameKey,
@@ -718,7 +775,7 @@ export function createEnemySystem(scene: THREE.Scene, mapId: WorldMapId): EnemyS
       homeZ: sz,
       patrolTargetX: sx,
       patrolTargetZ: sz,
-      yaw: rand() * Math.PI * 2,
+      yaw: initYaw,
       speed: 0,
       chaseSpeed: st.speed,
       aggroRange: st.aggro,
@@ -740,7 +797,17 @@ export function createEnemySystem(scene: THREE.Scene, mapId: WorldMapId): EnemyS
       knockVz: 0,
       gaitPhase: rand() * Math.PI * 2,
       pendingShockwave: false,
-    });
+      netTargetX: sx,
+      netTargetZ: sz,
+      netTargetYaw: initYaw,
+      netVelX: 0,
+      netVelZ: 0,
+      netReceivedAt: 0,
+      prevStateForFx: 'patrol',
+      hadNetState: false,
+    };
+    entities.push(entity);
+    entityById.set(id, entity);
   };
 
   // Populate all 5 archetypes dynamically across the active map's landmarks + near-camp trails
@@ -793,6 +860,61 @@ export function createEnemySystem(scene: THREE.Scene, mapId: WorldMapId): EnemyS
 
   const _toEnemy = new THREE.Vector3();
 
+  const applyHitToEntity = (
+    target: EnemyEntity,
+    dmg: number,
+    dirX: number,
+    dirZ: number,
+    isHeavy: boolean,
+    fromRemote = false,
+    hostPlayerPos?: THREE.Vector3
+  ): boolean => {
+    if (target.state === 'dead') return false;
+
+    target.hp = Math.max(0, target.hp - dmg);
+    target.hitFlash = 1.0;
+    target.staggerTimer = target.category === 'boss' ? 0.12 : 0.28;
+    const kbForce = target.category === 'boss' ? 3.5 : isHeavy ? 10.5 : 6.5;
+    target.knockVx = dirX * kbForce;
+    target.knockVz = dirZ * kbForce;
+
+    if (target.squadId) {
+      for (const mate of entities) {
+        if (mate.squadId === target.squadId && mate.state === 'patrol') {
+          mate.state = 'chase';
+        }
+      }
+    }
+
+    if (target.hp !== target.lastDrawnHp) {
+      target.lastDrawnHp = target.hp;
+      drawHealthBarCanvas(target.hpCanvas, target.hp, target.maxHp, target.category);
+      target.hpTex.needsUpdate = true;
+      target.hpSprite.visible = target.hp > 0;
+    }
+
+    let killed = false;
+    if (target.hp <= 0) {
+      killed = true;
+      defeatedCount++;
+      target.state = 'dead';
+      target.respawnTimer = target.category === 'boss' ? 55 : 26;
+      target.group.visible = false;
+      target.hpSprite.visible = false;
+      if (
+        fromRemote &&
+        hostPlayerPos &&
+        Math.hypot(target.pos.x - hostPlayerPos.x, target.pos.z - hostPlayerPos.z) <= 28
+      ) {
+        pendingCoopKills++;
+      }
+    } else if (target.state === 'patrol') {
+      target.state = 'chase';
+    }
+
+    return killed;
+  };
+
   const checkMeleeHit = (
     origin: THREE.Vector3,
     forwardDir: THREE.Vector3,
@@ -821,47 +943,157 @@ export function createEnemySystem(scene: THREE.Scene, mapId: WorldMapId): EnemyS
     if (!best) return null;
 
     const dmg = isHeavy ? 48 : 24;
-    best.hp = Math.max(0, best.hp - dmg);
-    best.hitFlash = 1.0;
-    best.staggerTimer = best.category === 'boss' ? 0.12 : 0.28;
-    const kbForce = best.category === 'boss' ? 3.5 : isHeavy ? 10.5 : 6.5;
-    best.knockVx = forwardDir.x * kbForce;
-    best.knockVz = forwardDir.z * kbForce;
 
-    // Alert entire squad if part of an enemy squad
-    if (best.squadId) {
-      for (const mate of entities) {
-        if (mate.squadId === best.squadId && mate.state === 'patrol') {
-          mate.state = 'chase';
-        }
-      }
+    if (remoteControlled) {
+      // Guest provides instant visual impact flash; Host confirms authoritative HP & kill
+      best.hitFlash = 1.0;
+      return {
+        enemyId: best.id,
+        hitPos: best.pos.clone(),
+        isMech: best.category === 'mech',
+        killed: false,
+        category: best.category,
+        damage: dmg,
+        dirX: clampFinite(forwardDir.x, -2, 2),
+        dirZ: clampFinite(forwardDir.z, -2, 2),
+        isHeavy,
+      };
     }
 
-    if (best.hp !== best.lastDrawnHp) {
-      best.lastDrawnHp = best.hp;
-      drawHealthBarCanvas(best.hpCanvas, best.hp, best.maxHp, best.category);
-      best.hpTex.needsUpdate = true;
-      best.hpSprite.visible = best.hp > 0;
-    }
-
-    let killed = false;
-    if (best.hp <= 0) {
-      killed = true;
-      defeatedCount++;
-      best.state = 'dead';
-      best.respawnTimer = best.category === 'boss' ? 55 : 26;
-      best.group.visible = false;
-      best.hpSprite.visible = false;
-    } else if (best.state === 'patrol') {
-      best.state = 'chase';
-    }
+    const killed = applyHitToEntity(best, dmg, forwardDir.x, forwardDir.z, isHeavy, false);
 
     return {
+      enemyId: best.id,
       hitPos: best.pos.clone(),
       isMech: best.category === 'mech',
       killed,
       category: best.category,
+      damage: dmg,
+      dirX: clampFinite(forwardDir.x, -2, 2),
+      dirZ: clampFinite(forwardDir.z, -2, 2),
+      isHeavy,
     };
+  };
+
+  const applyRemoteHit = (
+    enemyId: string,
+    damage: number,
+    dirX: number,
+    dirZ: number,
+    isHeavy: boolean,
+    hostPlayerPos?: THREE.Vector3
+  ): boolean => {
+    if (remoteControlled) return false;
+    const target = entityById.get(enemyId);
+    if (!target || target.state === 'dead') return false;
+    const safeDmg = clampFinite(damage, 1, 200);
+    applyHitToEntity(target, safeDmg, clampFinite(dirX, -2, 2), clampFinite(dirZ, -2, 2), isHeavy, true, hostPlayerPos);
+    return true;
+  };
+
+  const exportNetState = (): EnemyNetItem[] => {
+    return entities.slice(0, 24).map((e) => {
+      let yaw = e.yaw % (Math.PI * 2);
+      if (yaw > Math.PI) yaw -= Math.PI * 2;
+      if (yaw < -Math.PI) yaw += Math.PI * 2;
+      return {
+        id: e.id,
+        x: round2(clampFinite(e.pos.x, -499, 499)),
+        z: round2(clampFinite(e.pos.z, -499, 499)),
+        yaw: round2(clampFinite(yaw, -10, 10)),
+        hp: Math.round(clampFinite(e.hp, 0, 2000)),
+        st: e.state,
+        sp: round2(clampFinite(e.speed, 0, 39)),
+        tm: round2(clampFinite(e.state === 'dead' ? e.respawnTimer : e.stateTimer, 0, 120)),
+      };
+    });
+  };
+
+  const applyNetState = (items: EnemyNetItem[], localPlayerPos: THREE.Vector3): void => {
+    const now = performance.now();
+    for (const item of items) {
+      const e = entityById.get(item.id);
+      if (!e) continue;
+
+      const wasDead = e.state === 'dead';
+      const nowDead = item.st === 'dead' || item.hp <= 0;
+
+      if (!wasDead && nowDead) {
+        defeatedCount++;
+        e.state = 'dead';
+        e.hp = 0;
+        e.respawnTimer = Math.max(1, item.tm);
+        e.group.visible = false;
+        e.hpSprite.visible = false;
+        if (Math.hypot(e.pos.x - localPlayerPos.x, e.pos.z - localPlayerPos.z) <= 28) {
+          pendingCoopKills++;
+        }
+      } else if (wasDead && !nowDead) {
+        e.state = item.st;
+        e.hp = item.hp;
+        const gy = groundHeightAt(item.x, item.z, mapId);
+        e.pos.set(item.x, gy, item.z);
+        e.netTargetX = item.x;
+        e.netTargetZ = item.z;
+        e.netVelX = 0;
+        e.netVelZ = 0;
+        e.yaw = item.yaw;
+        e.group.position.copy(e.pos);
+        e.group.visible = true;
+      }
+
+      if (!nowDead) {
+        if (item.hp < e.hp && e.hadNetState) {
+          e.hitFlash = 1.0;
+        }
+        if (e.prevStateForFx === 'windup' && item.st === 'recover') {
+          e.pendingShockwave = true;
+        }
+        e.hp = item.hp;
+        e.state = item.st;
+        e.stateTimer = item.tm;
+        e.group.visible = true;
+      }
+
+      if (e.hp !== e.lastDrawnHp) {
+        e.lastDrawnHp = e.hp;
+        drawHealthBarCanvas(e.hpCanvas, e.hp, e.maxHp, e.category);
+        e.hpTex.needsUpdate = true;
+      }
+
+      if (!e.hadNetState) {
+        const gy = groundHeightAt(item.x, item.z, mapId);
+        e.pos.set(item.x, gy, item.z);
+        e.yaw = item.yaw;
+        e.netTargetX = item.x;
+        e.netTargetZ = item.z;
+        e.netTargetYaw = item.yaw;
+        e.netVelX = 0;
+        e.netVelZ = 0;
+        e.group.position.copy(e.pos);
+        e.group.rotation.y = e.yaw;
+      } else {
+        const dtPacket = Math.max(0.08, Math.min(0.9, (now - e.netReceivedAt) / 1000));
+        const vx = (item.x - e.netTargetX) / dtPacket;
+        const vz = (item.z - e.netTargetZ) / dtPacket;
+        const vMag = Math.hypot(vx, vz);
+        if (vMag > 20 || nowDead) {
+          e.netVelX = 0;
+          e.netVelZ = 0;
+        } else {
+          e.netVelX = vx;
+          e.netVelZ = vz;
+        }
+        e.netTargetX = item.x;
+        e.netTargetZ = item.z;
+        e.netTargetYaw = item.yaw;
+      }
+
+      e.speed = item.sp;
+      e.prevStateForFx = item.st;
+      e.netReceivedAt = now;
+      e.hadNetState = true;
+    }
   };
 
   const update = (
@@ -870,21 +1102,157 @@ export function createEnemySystem(scene: THREE.Scene, mapId: WorldMapId): EnemyS
     playerPos: THREE.Vector3,
     playerDodging: boolean,
     playerGuarding: boolean,
-    enteredWorld: boolean
+    enteredWorld: boolean,
+    allPlayerPositions?: THREE.Vector3[]
   ): EnemyUpdateResult => {
     let playerDamage = 0;
     let playerHitBlocked = false;
     const playerKnockDir = new THREE.Vector3();
     let bossShockwavePos: THREE.Vector3 | null = null;
     let mechShockwavePos: THREE.Vector3 | null = null;
+    const coopKilledCount = pendingCoopKills;
+    pendingCoopKills = 0;
 
-    // Alert squad mates if any member sees player
+    if (remoteControlled) {
+      const perfNow = performance.now();
+      const posBlend = 1 - Math.exp(-12.5 * dt);
+      const yawBlend = 1 - Math.exp(-14 * dt);
+
+      for (const e of entities) {
+        if (e.state === 'dead') {
+          e.group.visible = false;
+          e.hpSprite.visible = false;
+          continue;
+        }
+        e.group.visible = true;
+
+        if (e.hitFlash > 0) {
+          e.hitFlash = Math.max(0, e.hitFlash - dt * 4.5);
+          e.armorMat.emissive.setHex(e.category === 'mech' ? 0x38bdf8 : 0xff5522);
+          e.armorMat.emissiveIntensity = e.hitFlash * 0.9;
+        } else {
+          e.armorMat.emissiveIntensity = 0;
+        }
+
+        if (e.hadNetState) {
+          const sincePacket = Math.max(0, Math.min(0.28, (perfNow - e.netReceivedAt) / 1000));
+          const goalX = e.netTargetX + e.netVelX * sincePacket;
+          const goalZ = e.netTargetZ + e.netVelZ * sincePacket;
+          const nx = e.pos.x + (goalX - e.pos.x) * posBlend;
+          const nz = e.pos.z + (goalZ - e.pos.z) * posBlend;
+          if (isDryLand(nx, nz, 0.28)) {
+            e.pos.x = nx;
+            e.pos.z = nz;
+          } else {
+            e.pos.x = e.pos.x + (e.netTargetX - e.pos.x) * posBlend;
+            e.pos.z = e.pos.z + (e.netTargetZ - e.pos.z) * posBlend;
+          }
+          e.yaw = lerpAngle(e.yaw, e.netTargetYaw, yawBlend);
+        }
+
+        const gy = groundHeightAt(e.pos.x, e.pos.z, mapId);
+        e.pos.y = gy;
+        e.group.position.copy(e.pos);
+        e.group.rotation.y = e.yaw;
+
+        const dxLocal = playerPos.x - e.pos.x;
+        const dzLocal = playerPos.z - e.pos.z;
+        const distToLocal = Math.hypot(dxLocal, dzLocal);
+        e.hpSprite.visible = e.hp < e.maxHp || distToLocal < 16;
+
+        if (e.state === 'windup') {
+          e.glowMat.emissiveIntensity = 2.6 + Math.sin(elapsed * 28) * 0.9;
+        } else {
+          e.glowMat.emissiveIntensity = 1.5;
+        }
+
+        if (e.pendingShockwave) {
+          e.pendingShockwave = false;
+          if (e.category === 'boss') {
+            bossShockwavePos = e.pos.clone();
+          } else if (e.category === 'mech') {
+            mechShockwavePos = e.pos.clone();
+          }
+          if (enteredWorld && distToLocal <= e.attackRange + 0.95 && !playerDodging) {
+            const rawDmg = e.attackDamage;
+            const applied = playerGuarding ? Math.max(2, Math.round(rawDmg * 0.25)) : rawDmg;
+            playerDamage += applied;
+            if (playerGuarding) playerHitBlocked = true;
+            if (distToLocal > 0.01) {
+              playerKnockDir.set(dxLocal / distToLocal, 0, dzLocal / distToLocal);
+            }
+          }
+        }
+
+        // Procedural Limb / Wing / Rotor Animation
+        if (e.speed > 0.2) {
+          e.gaitPhase += dt * e.speed * 2.2;
+        } else {
+          e.gaitPhase += dt * 1.8;
+        }
+        const stride = e.speed > 0.2 ? Math.sin(e.gaitPhase) * 0.55 : Math.sin(e.gaitPhase) * 0.05;
+        if (e.leftLeg) e.leftLeg.rotation.x = stride;
+        if (e.rightLeg) e.rightLeg.rotation.x = -stride;
+
+        if (e.category === 'beast') {
+          if (e.backLimbA) e.backLimbA.rotation.x = -stride;
+          if (e.backLimbB) e.backLimbB.rotation.x = stride;
+          if (e.tailPivot) e.tailPivot.rotation.y = Math.sin(elapsed * 5 + e.gaitPhase) * 0.35;
+          e.bodyGroup.rotation.x = e.state === 'windup' ? -0.32 : 0;
+        } else if (e.category === 'boss') {
+          const wingFlap =
+            e.state === 'windup'
+              ? 0.55
+              : Math.sin(elapsed * 4.2 + e.gaitPhase * 0.3) * 0.34;
+          if (e.backLimbA) e.backLimbA.rotation.z = wingFlap;
+          if (e.backLimbB) e.backLimbB.rotation.z = -wingFlap;
+          if (e.tailPivot) e.tailPivot.rotation.y = Math.sin(elapsed * 3.1) * 0.28;
+          if (e.leftArm) {
+            e.leftArm.rotation.x = e.state === 'windup' ? -1.45 : -stride * 0.5;
+          }
+          if (e.rightArm) {
+            e.rightArm.rotation.x =
+              e.state === 'windup' ? -1.45 : e.state === 'recover' ? 0.65 : stride * 0.5;
+          }
+        } else {
+          if (e.leftArm) e.leftArm.rotation.x = -stride * 0.7;
+          if (e.rightArm) {
+            e.rightArm.rotation.x =
+              e.state === 'windup'
+                ? -1.65
+                : e.state === 'recover'
+                ? 0.75
+                : stride * 0.7;
+          }
+          if (e.rotorMesh) {
+            e.rotorMesh.rotation.y = elapsed * (e.state === 'chase' || e.state === 'windup' ? 9.5 : 3.2);
+          }
+        }
+      }
+
+      return {
+        playerDamage,
+        playerHitBlocked,
+        playerKnockDir,
+        bossShockwavePos,
+        mechShockwavePos,
+        coopKilledCount,
+      };
+    }
+
+    const targets = allPlayerPositions && allPlayerPositions.length > 0 ? allPlayerPositions : [playerPos];
+
+    // Alert squad mates if any member sees any player on this map
     const activeSquads = new Set<string>();
     if (enteredWorld) {
       for (const e of entities) {
         if (e.state !== 'dead' && e.squadId) {
-          const d = Math.hypot(playerPos.x - e.pos.x, playerPos.z - e.pos.z);
-          if (d <= e.aggroRange) activeSquads.add(e.squadId);
+          for (const tp of targets) {
+            if (Math.hypot(tp.x - e.pos.x, tp.z - e.pos.z) <= e.aggroRange) {
+              activeSquads.add(e.squadId);
+              break;
+            }
+          }
         }
       }
     }
@@ -932,12 +1300,27 @@ export function createEnemySystem(scene: THREE.Scene, mapId: WorldMapId): EnemyS
         e.knockVz *= Math.exp(-8.5 * dt);
       }
 
-      const dx = playerPos.x - e.pos.x;
-      const dz = playerPos.z - e.pos.z;
-      const distToPlayer = Math.hypot(dx, dz);
+      // Pick nearest player target among all teammates on the map
+      let dx = playerPos.x - e.pos.x;
+      let dz = playerPos.z - e.pos.z;
+      let distToTarget = Math.hypot(dx, dz);
+      const dxLocal = dx;
+      const dzLocal = dz;
+      const distToLocal = distToTarget;
+      for (let i = 1; i < targets.length; i++) {
+        const tdx = targets[i].x - e.pos.x;
+        const tdz = targets[i].z - e.pos.z;
+        const td = Math.hypot(tdx, tdz);
+        if (td < distToTarget) {
+          distToTarget = td;
+          dx = tdx;
+          dz = tdz;
+        }
+      }
+
       const distFromHome = Math.hypot(e.pos.x - e.homeX, e.pos.z - e.homeZ);
 
-      if (e.hp < e.maxHp || distToPlayer < 16) {
+      if (e.hp < e.maxHp || distToLocal < 16) {
         e.hpSprite.visible = true;
       } else {
         e.hpSprite.visible = false;
@@ -960,13 +1343,14 @@ export function createEnemySystem(scene: THREE.Scene, mapId: WorldMapId): EnemyS
         return false;
       };
 
-      if (!enteredWorld) {
+      const hasAnyTargetInWorld = enteredWorld || targets.length > 1;
+      if (!hasAnyTargetInWorld) {
         e.state = 'patrol';
       } else if (e.staggerTimer <= 0) {
         const squadAlert = e.squadId ? activeSquads.has(e.squadId) : false;
 
         if (e.state === 'patrol') {
-          if (distToPlayer <= e.aggroRange || squadAlert) {
+          if (distToTarget <= e.aggroRange || squadAlert) {
             e.state = 'chase';
           } else {
             e.stateTimer -= dt;
@@ -1006,18 +1390,18 @@ export function createEnemySystem(scene: THREE.Scene, mapId: WorldMapId): EnemyS
             }
           }
         } else if (e.state === 'chase') {
-          if (distToPlayer > e.aggroRange * 1.9 && distFromHome > 44) {
+          if (distToTarget > e.aggroRange * 1.9 && distFromHome > 44) {
             e.state = 'patrol';
-          } else if (distToPlayer <= e.attackRange && e.cooldownTimer <= 0) {
+          } else if (distToTarget <= e.attackRange && e.cooldownTimer <= 0) {
             e.state = 'windup';
             e.stateTimer = e.windupDuration;
             e.speed = 0;
             e.yaw = Math.atan2(dx, dz);
-          } else if (distToPlayer > e.attackRange * 0.85) {
+          } else if (distToTarget > e.attackRange * 0.85) {
             const targetYaw = Math.atan2(dx, dz);
             e.yaw = targetYaw;
-            const nx = e.pos.x + (dx / Math.max(0.01, distToPlayer)) * e.chaseSpeed * dt;
-            const nz = e.pos.z + (dz / Math.max(0.01, distToPlayer)) * e.chaseSpeed * dt;
+            const nx = e.pos.x + (dx / Math.max(0.01, distToTarget)) * e.chaseSpeed * dt;
+            const nz = e.pos.z + (dz / Math.max(0.01, distToTarget)) * e.chaseSpeed * dt;
             if (tryStepDry(nx, nz)) {
               e.speed = e.chaseSpeed;
             } else {
@@ -1038,13 +1422,13 @@ export function createEnemySystem(scene: THREE.Scene, mapId: WorldMapId): EnemyS
             } else if (e.category === 'mech') {
               mechShockwavePos = e.pos.clone();
             }
-            if (distToPlayer <= e.attackRange + 0.85 && !playerDodging) {
+            if (enteredWorld && distToLocal <= e.attackRange + 0.95 && !playerDodging) {
               const rawDmg = e.attackDamage;
               const applied = playerGuarding ? Math.max(2, Math.round(rawDmg * 0.25)) : rawDmg;
               playerDamage += applied;
               if (playerGuarding) playerHitBlocked = true;
-              if (distToPlayer > 0.01) {
-                playerKnockDir.set(dx / distToPlayer, 0, dz / distToPlayer);
+              if (distToLocal > 0.01) {
+                playerKnockDir.set(dxLocal / distToLocal, 0, dzLocal / distToLocal);
               }
             }
             e.state = 'recover';
@@ -1127,6 +1511,7 @@ export function createEnemySystem(scene: THREE.Scene, mapId: WorldMapId): EnemyS
       playerKnockDir,
       bossShockwavePos,
       mechShockwavePos,
+      coopKilledCount,
     };
   };
 
@@ -1180,6 +1565,13 @@ export function createEnemySystem(scene: THREE.Scene, mapId: WorldMapId): EnemyS
 
   return {
     root,
+    setRemoteControlled: (remote: boolean) => {
+      remoteControlled = remote;
+    },
+    isRemoteControlled: () => remoteControlled,
+    exportNetState,
+    applyNetState,
+    applyRemoteHit,
     checkMeleeHit,
     update,
     getHudTarget,

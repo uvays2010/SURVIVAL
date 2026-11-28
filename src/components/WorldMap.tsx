@@ -594,20 +594,16 @@ export const WorldMap: React.FC<WorldMapProps> = ({
         title={t.map.minimapLabel}
         className={`group absolute z-20 border border-white/20 bg-[#0b1016]/85 shadow-[0_6px_18px_rgba(0,0,0,0.5)] overflow-hidden cursor-pointer transition-transform active:scale-95 hover:border-amber-400/70 select-none ${
           compact
-            ? 'top-9 right-2.5 w-[62px] h-[62px] rounded-lg'
+            ? 'top-10 right-2.5 w-[94px] h-[94px] rounded-xl'
             : 'top-14 right-5 w-[132px] h-[132px] rounded-xl'
         }`}
       >
         <canvas ref={miniCanvasRef} width={220} height={220} className="w-full h-full block" />
-        <div
-          className={`pointer-events-none absolute inset-0 ring-1 ring-inset ring-white/10 ${
-            compact ? 'rounded-lg' : 'rounded-xl'
-          }`}
-        />
+        <div className="pointer-events-none absolute inset-0 rounded-xl ring-1 ring-inset ring-white/10" />
 
         <span
-          className={`pointer-events-none absolute top-0.5 left-1/2 -translate-x-1/2 rounded bg-[#0b1016]/85 font-bold tracking-wider text-amber-300 border border-white/10 ${
-            compact ? 'px-1 py-0 text-[8px]' : 'top-1 px-1.5 py-[1px] text-[10px]'
+          className={`pointer-events-none absolute top-1 left-1/2 -translate-x-1/2 rounded bg-[#0b1016]/85 font-bold tracking-wider text-amber-300 border border-white/10 ${
+            compact ? 'px-1 py-0 text-[8.5px]' : 'px-1.5 py-[1px] text-[10px]'
           }`}
         >
           {t.map.northShort}
@@ -621,10 +617,10 @@ export const WorldMap: React.FC<WorldMapProps> = ({
           )}
           <span
             className={`ml-auto flex items-center gap-1 rounded bg-[#0b1016]/85 font-medium text-stone-200 border border-white/10 group-hover:text-amber-300 ${
-              compact ? 'px-1 py-[1px] text-[8px]' : 'px-1.5 py-[2px] text-[10px]'
+              compact ? 'px-1 py-[1px] text-[8.5px]' : 'px-1.5 py-[2px] text-[10px]'
             }`}
           >
-            <Maximize2 className={compact ? 'w-2 h-2' : 'w-2.5 h-2.5'} />
+            <Maximize2 className={compact ? 'w-2.5 h-2.5' : 'w-2.5 h-2.5'} />
             {!compact && <span>M</span>}
           </span>
         </span>
@@ -724,7 +720,7 @@ export const WorldMap: React.FC<WorldMapProps> = ({
                     </div>
                   </div>
 
-                  <div className="relative w-full aspect-square max-h-[58vh] mx-auto rounded-lg overflow-hidden border border-white/15 bg-[#0b1016]">
+                  <div className="relative w-full aspect-square max-h-[70vh] sm:max-h-[58vh] mx-auto rounded-lg overflow-hidden border border-white/15 bg-[#0b1016]">
                     <canvas
                       ref={fullCanvasRef}
                       width={520}

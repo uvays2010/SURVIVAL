@@ -19,10 +19,12 @@ const VALID_MAP_IDS = new Set([
 
 const DEFAULT_ROOM_ID = 'global';
 const MAX_PLAYERS_PER_ROOM = 32;
-const MAX_PAYLOAD_BYTES = 2048;
+const MAX_PAYLOAD_BYTES = 16384;
 const CHAT_COOLDOWN_MS = 350;
 const PLAYER_STALE_MS = 18000;
 const MAX_CHAT_HISTORY = 50;
+const VALID_WEATHER_MODES = new Set(['DYNAMIC', 'CLEAR', 'FOGGY', 'RAIN', 'STORM', 'SNOW']);
+const VALID_ENEMY_STATES = new Set(['patrol', 'chase', 'windup', 'recover', 'dead']);
 
 interface ServerPlayer {
   id: string;
@@ -54,6 +56,41 @@ interface ChatRecord {
   name: string;
   colorIdx: number;
   text: string;
+  ts: number;
+}
+
+interface ServerEnemyEntry {
+  id: string;
+  x: number;
+  z: number;
+  yaw: number;
+  hp: number;
+  st: 'patrol' | 'chase' | 'windup' | 'recover' | 'dead';
+  sp: number;
+  tm: number;
+}
+
+interface ServerWorldState {
+  mapId: string;
+  weatherMode: string;
+  timeAnchorHours: number;
+  timeAnchorMs: number;
+  timePaused: boolean;
+  campfireLit: boolean;
+  hostSessionId: string;
+  enemies: ServerEnemyEntry[];
+  updatedAt: number;
+}
+
+interface ServerEnemyHitRecord {
+  id: string;
+  mapId: string;
+  enemyId: string;
+  attackerId: string;
+  damage: number;
+  dirX: number;
+  dirZ: number;
+  heavy: boolean;
   ts: number;
 }
 
@@ -108,15 +145,51 @@ function sanitizeChatText(raw: unknown): string {
     .slice(0, 140);
 }
 
+function sanitizeWeatherMode(raw: unknown): string {
+  if (typeof raw === 'string' && VALID_WEATHER_MODES.has(raw)) {
+    return raw;
+  }
+  return 'DYNAMIC';
+}
+
+function sanitizeEnemyList(raw: unknown): ServerEnemyEntry[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ServerEnemyEntry[] = [];
+  for (let i = 0; i < Math.min(24, raw.length); i++) {
+    const item = raw[i] as Record<string, unknown> | null;
+    if (!item || typeof item !== 'object') continue;
+    const id = typeof item.id === 'string' ? item.id.slice(0, 48) : '';
+    if (!id) continue;
+    const st = typeof item.st === 'string' && VALID_ENEMY_STATES.has(item.st)
+      ? (item.st as ServerEnemyEntry['st'])
+      : 'patrol';
+    out.push({
+      id,
+      x: clampNum(item.x, -500, 500, 0),
+      z: clampNum(item.z, -500, 500, 0),
+      yaw: clampNum(item.yaw, -100, 100, 0),
+      hp: Math.round(clampNum(item.hp, 0, 2000, 100)),
+      st,
+      sp: clampNum(item.sp, 0, 40, 0),
+      tm: clampNum(item.tm, 0, 120, 0),
+    });
+  }
+  return out;
+}
+
 const rooms = new Map<string, Map<string, ServerPlayer>>();
 const roomSockets = new Map<string, Set<ClientSession>>();
 const roomChats = new Map<string, ChatRecord[]>();
+const roomWorlds = new Map<string, Map<string, ServerWorldState>>();
+const roomHits = new Map<string, ServerEnemyHitRecord[]>();
 const httpChatCooldown = new Map<string, number>();
 
 function getOrCreateRoom(roomId: string): {
   players: Map<string, ServerPlayer>;
   sockets: Set<ClientSession>;
   chats: ChatRecord[];
+  worlds: Map<string, ServerWorldState>;
+  hits: ServerEnemyHitRecord[];
 } {
   let players = rooms.get(roomId);
   if (!players) {
@@ -133,7 +206,40 @@ function getOrCreateRoom(roomId: string): {
     chats = [];
     roomChats.set(roomId, chats);
   }
-  return { players, sockets, chats };
+  let worlds = roomWorlds.get(roomId);
+  if (!worlds) {
+    worlds = new Map<string, ServerWorldState>();
+    roomWorlds.set(roomId, worlds);
+  }
+  let hits = roomHits.get(roomId);
+  if (!hits) {
+    hits = [];
+    roomHits.set(roomId, hits);
+  }
+  return { players, sockets, chats, worlds, hits };
+}
+
+function getOrInitWorld(
+  worlds: Map<string, ServerWorldState>,
+  mapId: string,
+  hostSessionId: string
+): ServerWorldState {
+  let w = worlds.get(mapId);
+  if (!w) {
+    w = {
+      mapId,
+      weatherMode: 'DYNAMIC',
+      timeAnchorHours: 17.65,
+      timeAnchorMs: Date.now(),
+      timePaused: false,
+      campfireLit: true,
+      hostSessionId,
+      enemies: [],
+      updatedAt: Date.now(),
+    };
+    worlds.set(mapId, w);
+  }
+  return w;
 }
 
 function broadcastToRoom(roomId: string, payload: unknown, excludeId?: string): void {
@@ -155,6 +261,8 @@ function cleanupRoomIfEmpty(roomId: string): void {
     rooms.delete(roomId);
     roomSockets.delete(roomId);
     roomChats.delete(roomId);
+    roomWorlds.delete(roomId);
+    roomHits.delete(roomId);
   }
 }
 
@@ -211,7 +319,7 @@ function recordAndBroadcastChat(roomId: string, player: ServerPlayer, text: stri
 
 async function startServer(): Promise<void> {
   const app = express();
-  app.use(express.json({ limit: '4kb' }));
+  app.use(express.json({ limit: '16kb' }));
   app.use(express.text({ limit: '4kb', type: 'text/plain' }));
 
   const server = http.createServer(app);
@@ -231,7 +339,7 @@ async function startServer(): Promise<void> {
     const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>;
     const roomId = sanitizeRoomId(body.roomId);
     const prevId = typeof body.playerId === 'string' && body.playerId.length <= 64 ? body.playerId : '';
-    const { players, chats } = getOrCreateRoom(roomId);
+    const { players, chats, worlds } = getOrCreateRoom(roomId);
 
     const playerId = prevId && players.has(prevId) ? prevId : crypto.randomUUID();
     if (!players.has(playerId) && players.size >= MAX_PLAYERS_PER_ROOM) {
@@ -272,6 +380,8 @@ async function startServer(): Promise<void> {
       roomId,
       players: Array.from(players.values()),
       messages: chats.slice(-25),
+      worlds: Array.from(worlds.values()),
+      serverNowMs: Date.now(),
     });
   });
 
@@ -280,8 +390,9 @@ async function startServer(): Promise<void> {
     const roomId = sanitizeRoomId(body.roomId);
     const playerId = typeof body.playerId === 'string' ? body.playerId : '';
     const sinceTs = clampNum(body.sinceTs, 0, Number.MAX_SAFE_INTEGER, 0);
+    const sinceHitTs = clampNum(body.sinceHitTs, 0, Number.MAX_SAFE_INTEGER, 0);
 
-    const { players, chats } = getOrCreateRoom(roomId);
+    const { players, chats, worlds, hits } = getOrCreateRoom(roomId);
     const player = players.get(playerId);
     if (!player) {
       res.status(404).json({ ok: false, error: 'NOT_JOINED' });
@@ -296,11 +407,85 @@ async function startServer(): Promise<void> {
     }
 
     const recentMessages = sinceTs > 0 ? chats.filter((m) => m.ts > sinceTs) : chats.slice(-20);
+    const recentHits = hits.filter((h) => h.ts > sinceHitTs && h.attackerId !== playerId);
     res.json({
       ok: true,
       players: Array.from(players.values()),
       messages: recentMessages,
+      worlds: Array.from(worlds.values()),
+      hits: recentHits,
+      serverNowMs: Date.now(),
     });
+  });
+
+  app.post('/api/mp/world-env', (req, res) => {
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>;
+    const roomId = sanitizeRoomId(body.roomId);
+    const playerId = typeof body.playerId === 'string' ? body.playerId : '';
+    const { players, worlds } = getOrCreateRoom(roomId);
+    if (!players.has(playerId)) {
+      res.status(404).json({ ok: false });
+      return;
+    }
+    const mapId = sanitizeMapId(body.mapId);
+    const w = getOrInitWorld(worlds, mapId, playerId);
+    if (body.weatherMode !== undefined) w.weatherMode = sanitizeWeatherMode(body.weatherMode);
+    if (body.timeAnchorHours !== undefined) w.timeAnchorHours = clampNum(body.timeAnchorHours, 0, 24, w.timeAnchorHours);
+    if (body.timeAnchorMs !== undefined) w.timeAnchorMs = clampNum(body.timeAnchorMs, 0, 99999999999999, Date.now());
+    if (body.timePaused !== undefined) w.timePaused = Boolean(body.timePaused);
+    if (body.campfireLit !== undefined) w.campfireLit = Boolean(body.campfireLit);
+    w.updatedAt = Date.now();
+    broadcastToRoom(roomId, { type: 'world:state', world: w, serverNowMs: Date.now() }, playerId);
+    res.json({ ok: true, world: w });
+  });
+
+  app.post('/api/mp/world-enemies', (req, res) => {
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>;
+    const roomId = sanitizeRoomId(body.roomId);
+    const playerId = typeof body.playerId === 'string' ? body.playerId : '';
+    const { players, worlds } = getOrCreateRoom(roomId);
+    if (!players.has(playerId)) {
+      res.status(404).json({ ok: false });
+      return;
+    }
+    const mapId = sanitizeMapId(body.mapId);
+    const w = getOrInitWorld(worlds, mapId, playerId);
+    w.hostSessionId = playerId;
+    w.enemies = sanitizeEnemyList(body.enemies);
+    w.updatedAt = Date.now();
+    broadcastToRoom(roomId, { type: 'world:state', world: w, serverNowMs: Date.now() }, playerId);
+    res.json({ ok: true });
+  });
+
+  app.post('/api/mp/enemy-hit', (req, res) => {
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>;
+    const roomId = sanitizeRoomId(body.roomId);
+    const playerId = typeof body.playerId === 'string' ? body.playerId : '';
+    const { players, hits } = getOrCreateRoom(roomId);
+    if (!players.has(playerId)) {
+      res.status(404).json({ ok: false });
+      return;
+    }
+    const enemyId = typeof body.enemyId === 'string' ? body.enemyId.slice(0, 48) : '';
+    if (!enemyId) {
+      res.status(400).json({ ok: false });
+      return;
+    }
+    const hit: ServerEnemyHitRecord = {
+      id: crypto.randomUUID(),
+      mapId: sanitizeMapId(body.mapId),
+      enemyId,
+      attackerId: playerId,
+      damage: Math.round(clampNum(body.damage, 1, 200, 24)),
+      dirX: clampNum(body.dirX, -2, 2, 0),
+      dirZ: clampNum(body.dirZ, -2, 2, 1),
+      heavy: Boolean(body.heavy),
+      ts: Date.now(),
+    };
+    hits.push(hit);
+    if (hits.length > 40) hits.splice(0, hits.length - 40);
+    broadcastToRoom(roomId, { type: 'enemy:hit', hit }, playerId);
+    res.json({ ok: true });
   });
 
   app.post('/api/mp/rename', (req, res) => {
@@ -401,7 +586,7 @@ async function startServer(): Promise<void> {
           removeFromRoom(session);
         }
 
-        const { players, sockets, chats } = getOrCreateRoom(nextRoomId);
+        const { players, sockets, chats, worlds } = getOrCreateRoom(nextRoomId);
         if (!players.has(session.playerId) && players.size >= MAX_PLAYERS_PER_ROOM) {
           ws.send(JSON.stringify({ type: 'error', code: 'ROOM_FULL' }));
           return;
@@ -446,6 +631,8 @@ async function startServer(): Promise<void> {
             roomId: nextRoomId,
             players: Array.from(players.values()),
             messages: chats.slice(-25),
+            worlds: Array.from(worlds.values()),
+            serverNowMs: Date.now(),
           })
         );
 
@@ -475,6 +662,60 @@ async function startServer(): Promise<void> {
           { type: 'player:state', player: current },
           session.playerId
         );
+        return;
+      }
+
+      if (type === 'world:env') {
+        const { worlds } = getOrCreateRoom(session.roomId);
+        const mapId = sanitizeMapId(msg.mapId);
+        const w = getOrInitWorld(worlds, mapId, session.playerId);
+        if (msg.weatherMode !== undefined) w.weatherMode = sanitizeWeatherMode(msg.weatherMode);
+        if (msg.timeAnchorHours !== undefined) w.timeAnchorHours = clampNum(msg.timeAnchorHours, 0, 24, w.timeAnchorHours);
+        if (msg.timeAnchorMs !== undefined) w.timeAnchorMs = clampNum(msg.timeAnchorMs, 0, 99999999999999, Date.now());
+        if (msg.timePaused !== undefined) w.timePaused = Boolean(msg.timePaused);
+        if (msg.campfireLit !== undefined) w.campfireLit = Boolean(msg.campfireLit);
+        w.updatedAt = Date.now();
+        broadcastToRoom(
+          session.roomId,
+          { type: 'world:state', world: w, serverNowMs: Date.now() },
+          session.playerId
+        );
+        return;
+      }
+
+      if (type === 'world:enemies') {
+        const { worlds } = getOrCreateRoom(session.roomId);
+        const mapId = sanitizeMapId(msg.mapId);
+        const w = getOrInitWorld(worlds, mapId, session.playerId);
+        w.hostSessionId = session.playerId;
+        w.enemies = sanitizeEnemyList(msg.enemies);
+        w.updatedAt = Date.now();
+        broadcastToRoom(
+          session.roomId,
+          { type: 'world:state', world: w, serverNowMs: Date.now() },
+          session.playerId
+        );
+        return;
+      }
+
+      if (type === 'enemy:hit') {
+        const { hits } = getOrCreateRoom(session.roomId);
+        const enemyId = typeof msg.enemyId === 'string' ? msg.enemyId.slice(0, 48) : '';
+        if (!enemyId) return;
+        const hit: ServerEnemyHitRecord = {
+          id: crypto.randomUUID(),
+          mapId: sanitizeMapId(msg.mapId),
+          enemyId,
+          attackerId: session.playerId,
+          damage: Math.round(clampNum(msg.damage, 1, 200, 24)),
+          dirX: clampNum(msg.dirX, -2, 2, 0),
+          dirZ: clampNum(msg.dirZ, -2, 2, 1),
+          heavy: Boolean(msg.heavy),
+          ts: Date.now(),
+        };
+        hits.push(hit);
+        if (hits.length > 40) hits.splice(0, hits.length - 40);
+        broadcastToRoom(session.roomId, { type: 'enemy:hit', hit }, session.playerId);
         return;
       }
 

@@ -21,6 +21,7 @@ export interface CombatHitResult {
   shake: number;
   targetKind: 'none' | 'crate' | 'totem' | 'wildlife' | 'enemy';
   killedEnemy?: boolean;
+  enemyHit?: EnemyMeleeHitInfo | null;
 }
 
 interface SlashArcInstance {
@@ -704,6 +705,7 @@ export function createCombatSystem(
       shake: hit ? (isHeavy ? 0.55 : 0.24) : isHeavy ? 0.28 : 0.08,
       targetKind,
       killedEnemy,
+      enemyHit,
     };
   };
 

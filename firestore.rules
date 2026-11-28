@@ -31,6 +31,10 @@ service cloud.firestore {
       return id is string && id.size() >= 4 && id.size() <= 64 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
+    function isValidEnemyId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 48 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
     function isValidMapId(mapId) {
       return mapId in [
         'lost_valley',
@@ -42,6 +46,10 @@ service cloud.firestore {
         'twin_fjords',
         'highland_meadows'
       ];
+    }
+
+    function isValidWeatherMode(mode) {
+      return mode in ['DYNAMIC', 'CLEAR', 'FOGGY', 'RAIN', 'STORM', 'SNOW'];
     }
 
     function isFiniteInRange(val, minVal, maxVal) {
@@ -136,6 +144,86 @@ service cloud.firestore {
         && data.createdAt == request.time;
     }
 
+    function isValidEnemyEntry(e) {
+      return e is map
+        && e.keys().hasAll(['id', 'x', 'z', 'yaw', 'hp', 'st', 'sp', 'tm'])
+        && e.keys().hasOnly(['id', 'x', 'z', 'yaw', 'hp', 'st', 'sp', 'tm'])
+        && isValidEnemyId(e.id)
+        && isFiniteInRange(e.x, -500, 500)
+        && isFiniteInRange(e.z, -500, 500)
+        && isFiniteInRange(e.yaw, -100, 100)
+        && isFiniteInRange(e.hp, 0, 2000)
+        && e.st is string
+        && e.st in ['patrol', 'chase', 'windup', 'recover', 'dead']
+        && isFiniteInRange(e.sp, 0, 40)
+        && isFiniteInRange(e.tm, 0, 120);
+    }
+
+    function isValidRoomWorld(data, roomId, mapId) {
+      return data.keys().hasAll([
+          'id', 'roomId', 'mapId', 'weatherMode',
+          'timeAnchorHours', 'timeAnchorMs', 'timePaused', 'campfireLit',
+          'hostSessionId', 'enemies', 'updatedByUid', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'roomId', 'mapId', 'weatherMode',
+          'timeAnchorHours', 'timeAnchorMs', 'timePaused', 'campfireLit',
+          'hostSessionId', 'enemies', 'updatedByUid', 'createdAt', 'updatedAt'
+        ])
+        && data.id == mapId
+        && isValidMapId(data.id)
+        && data.roomId == roomId
+        && isValidRoomId(data.roomId)
+        && data.mapId == mapId
+        && isValidMapId(data.mapId)
+        && data.weatherMode is string
+        && isValidWeatherMode(data.weatherMode)
+        && isFiniteInRange(data.timeAnchorHours, 0, 24)
+        && isFiniteInRange(data.timeAnchorMs, 0, 99999999999999)
+        && data.timePaused is bool
+        && data.campfireLit is bool
+        && isValidSessionId(data.hostSessionId)
+        && data.enemies is list
+        && data.enemies.size() <= 24
+        && (data.enemies.size() == 0 || isValidEnemyEntry(data.enemies[0]))
+        && data.updatedByUid is string
+        && data.updatedByUid.size() >= 1
+        && data.updatedByUid.size() <= 128
+        && data.updatedByUid.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp
+        && data.updatedAt == request.time;
+    }
+
+    function isValidRoomEnemyHit(data, roomId, hitId) {
+      return data.keys().hasAll([
+          'id', 'ownerUid', 'roomId', 'mapId', 'enemyId',
+          'attackerId', 'damage', 'dirX', 'dirZ', 'heavy', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerUid', 'roomId', 'mapId', 'enemyId',
+          'attackerId', 'damage', 'dirX', 'dirZ', 'heavy', 'createdAt'
+        ])
+        && data.id == hitId
+        && isValidSessionId(data.id)
+        && data.ownerUid is string
+        && data.ownerUid.size() >= 1
+        && data.ownerUid.size() <= 128
+        && data.ownerUid.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.roomId == roomId
+        && isValidRoomId(data.roomId)
+        && data.mapId is string
+        && isValidMapId(data.mapId)
+        && isValidEnemyId(data.enemyId)
+        && isValidSessionId(data.attackerId)
+        && isFiniteInRange(data.damage, 1, 200)
+        && isFiniteInRange(data.dirX, -2, 2)
+        && isFiniteInRange(data.dirZ, -2, 2)
+        && data.heavy is bool
+        && data.createdAt is timestamp
+        && data.createdAt == request.time;
+    }
+
     // Connection probe document
     match /test/connection {
       allow get: if isVerifiedUser();
@@ -224,6 +312,80 @@ service cloud.firestore {
         allow delete: if isVerifiedUser()
           && isValidRoomId(roomId)
           && isValidSessionId(messageId)
+          && existing().ownerUid == request.auth.uid;
+      }
+
+      // Shared room environment (weather, time, campfire) & host-authoritative enemies per map
+      match /worlds/{mapId} {
+        allow get: if isVerifiedUser()
+          && isValidRoomId(roomId)
+          && isValidMapId(mapId)
+          && existing().roomId == roomId;
+
+        allow list: if isVerifiedUser()
+          && resource.data.roomId == roomId;
+
+        allow create: if isVerifiedUser()
+          && isValidRoomId(roomId)
+          && isValidMapId(mapId)
+          && isValidRoomWorld(incoming(), roomId, mapId)
+          && incoming().updatedByUid == request.auth.uid
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/rooms/$(roomId));
+
+        allow update: if isVerifiedUser()
+          && isValidRoomId(roomId)
+          && isValidMapId(mapId)
+          && isValidRoomWorld(incoming(), roomId, mapId)
+          && incoming().updatedByUid == request.auth.uid
+          && incoming().id == existing().id
+          && incoming().roomId == existing().roomId
+          && incoming().mapId == existing().mapId
+          && incoming().createdAt == existing().createdAt
+          && (
+            // Action 1: Shared environment update (weather, time, campfire)
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'weatherMode', 'timeAnchorHours', 'timeAnchorMs', 'timePaused',
+              'campfireLit', 'updatedByUid', 'updatedAt'
+            ])
+            ||
+            // Action 2: Host enemy state snapshot sync
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'hostSessionId', 'enemies', 'updatedByUid', 'updatedAt'
+            ])
+            ||
+            // Action 3: Combined world & enemy sync
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'weatherMode', 'timeAnchorHours', 'timeAnchorMs', 'timePaused',
+              'campfireLit', 'hostSessionId', 'enemies', 'updatedByUid', 'updatedAt'
+            ])
+          );
+
+        allow delete: if false;
+      }
+
+      // Co-op guest melee hit events targeting shared enemies
+      match /hits/{hitId} {
+        allow get: if isVerifiedUser()
+          && isValidRoomId(roomId)
+          && isValidSessionId(hitId)
+          && existing().roomId == roomId;
+
+        allow list: if isVerifiedUser()
+          && resource.data.roomId == roomId;
+
+        allow create: if isVerifiedUser()
+          && isValidRoomId(roomId)
+          && isValidSessionId(hitId)
+          && isValidRoomEnemyHit(incoming(), roomId, hitId)
+          && incoming().ownerUid == request.auth.uid
+          && exists(/databases/$(database)/documents/rooms/$(roomId));
+
+        allow update: if false;
+
+        allow delete: if isVerifiedUser()
+          && isValidRoomId(roomId)
+          && isValidSessionId(hitId)
           && existing().ownerUid == request.auth.uid;
       }
     }

@@ -34,8 +34,13 @@ import { createCharacterSystem } from './character';
 import { createWildlifeSystem } from './wildlife';
 import { createWeatherAndVfxSystem } from './weatherAndVfx';
 import { createCombatSystem, CombatSystem } from './combat';
-import { createEnemySystem, EnemySystem } from './enemies';
-import { NetLocalPlayerState, RemotePlayerState } from './multiplayer';
+import { createEnemySystem, EnemyNetItem, EnemySystem } from './enemies';
+import {
+  NetLocalPlayerState,
+  RemotePlayerState,
+  RoomEnemyHitEvent,
+  RoomWorldState,
+} from './multiplayer';
 import { RemotePlayersSystem } from './remotePlayers';
 
 // Custom HDR Filmic Grading + Crisp Unsharp Clarity + Subtle Vignette (Zero Blur)
@@ -126,6 +131,30 @@ export interface SurvivalEngineCallbacks {
   onLoadProgress?: (progress: SurvivalLoadProgress) => void;
   onMapSwitchProgress?: (progress: SurvivalLoadProgress) => void;
   onLocalStateSync?: (state: NetLocalPlayerState) => void;
+  onSyncedEnvChange?: (env: {
+    weatherMode: WeatherMode;
+    timePaused: boolean;
+    timeHours: number;
+    campfireLit: boolean;
+  }) => void;
+  onRoomEnvPublish?: (
+    env: {
+      weatherMode?: WeatherMode;
+      timeAnchorHours?: number;
+      timeAnchorMs?: number;
+      timePaused?: boolean;
+      campfireLit?: boolean;
+    },
+    initialEnemies?: EnemyNetItem[]
+  ) => void;
+  onEnemyStatePublish?: (enemies: EnemyNetItem[], force?: boolean) => void;
+  onEnemyHitSend?: (hit: {
+    enemyId: string;
+    damage: number;
+    dirX: number;
+    dirZ: number;
+    heavy: boolean;
+  }) => void;
   initialQuality?: QualityPreset;
   initialSensitivity?: number;
   initialMapId?: WorldMapId;
@@ -168,9 +197,22 @@ export class SurvivalEngine {
   private quality: QualityPreset = 'HIGH';
   private graphicsFlags: GraphicsFlags = getPresetGraphicsFlags('HIGH');
   private cameraMode: CameraMode = 'THIRD_PERSON';
+  private weatherMode: WeatherMode = 'DYNAMIC';
   private timeHours = 17.65; // Dramatic golden-hour sunset start
+  private timeAnchorHours = 17.65;
+  private timeAnchorMs = Date.now();
+  private serverTimeOffsetMs = 0;
   private timePaused = false;
   private timeSpeed = 0.06; // ~6.6 mins per full 24h cycle
+
+  private isWorldHost = true;
+  private hasSameMapTeammates = false;
+  private lastEnemySyncAt = 0;
+  private lastEnemyStateSig = '';
+  private pendingEnemySyncForce = false;
+  private allPlayerPositions: THREE.Vector3[] = [];
+  private remotePosPool: THREE.Vector3[] = [];
+  private lastRemoteWorldEnemies: EnemyNetItem[] | null = null;
 
   private envUniforms = createSharedEnvUniforms();
   private textures!: ProceduralTextureSet;
@@ -266,10 +308,17 @@ export class SurvivalEngine {
     this.activeMapId = callbacks.initialMapId ?? 'lost_valley';
     setActiveWorldMap(this.activeMapId);
     const mapDef = getWorldMapDef(this.activeMapId);
+    this.weatherMode = mapDef.defaultWeather;
     this.timeHours = mapDef.defaultTimeHours;
+    this.timeAnchorHours = mapDef.defaultTimeHours;
+    this.timeAnchorMs = this.getServerNowMs();
     this.camYaw = mapDef.spawn.yaw;
     this.prevCamYaw = mapDef.spawn.yaw;
     void this.init();
+  }
+
+  private getServerNowMs(): number {
+    return Date.now() + this.serverTimeOffsetMs;
   }
 
   private yieldFrame(): Promise<void> {
@@ -452,6 +501,7 @@ export class SurvivalEngine {
 
     this.wildlife = createWildlifeSystem(this.scene, textures.softGlowMap, this.world.flowerPositions);
     this.weatherVfx = createWeatherAndVfxSystem(this.scene, textures, this.world.campfirePos);
+    this.weatherMode = mapDef.defaultWeather;
     this.weatherVfx.setWeatherMode(mapDef.defaultWeather);
     this.combat = createCombatSystem(
       this.scene,
@@ -460,6 +510,7 @@ export class SurvivalEngine {
       this.world.totemAnchors
     );
     this.enemies = createEnemySystem(this.scene, this.activeMapId);
+    this.enemies.setRemoteControlled(!this.isWorldHost && this.hasSameMapTeammates);
     this.remotePlayersSystem = new RemotePlayersSystem(this.scene, textures);
 
     // Volumetric Sunset / Golden-Hour God-Ray Shaft Planes across the Valley
@@ -860,6 +911,7 @@ export class SurvivalEngine {
     const distCamp = this.character.state.position.distanceTo(this.world.campfirePos);
     if (distCamp < 5.5) {
       this.weatherVfx.toggleCampfire();
+      this.publishCurrentRoomEnv();
     } else {
       const { dist } = waterDistanceInfo(this.character.state.position.x, this.character.state.position.z);
       if (dist < 3.5) {
@@ -989,8 +1041,10 @@ export class SurvivalEngine {
   }
 
   public setWeatherMode(mode: WeatherMode): void {
+    this.weatherMode = mode;
     if (!this.worldReady) return;
     this.weatherVfx.setWeatherMode(mode);
+    this.publishCurrentRoomEnv();
   }
 
   public setCameraMode(mode: CameraMode): void {
@@ -998,11 +1052,120 @@ export class SurvivalEngine {
   }
 
   public setTimeOfDay(hours: number): void {
-    this.timeHours = ((hours % 24) + 24) % 24;
+    const clamped = ((hours % 24) + 24) % 24;
+    this.timeHours = clamped;
+    this.timeAnchorHours = clamped;
+    this.timeAnchorMs = this.getServerNowMs();
+    this.publishCurrentRoomEnv();
   }
 
   public setTimePaused(paused: boolean): void {
+    if (!this.timePaused && paused) {
+      const elapsedSec = Math.max(0, (this.getServerNowMs() - this.timeAnchorMs) / 1000);
+      this.timeHours = (((this.timeAnchorHours + elapsedSec * this.timeSpeed) % 24) + 24) % 24;
+    }
+    this.timeAnchorHours = this.timeHours;
+    this.timeAnchorMs = this.getServerNowMs();
     this.timePaused = paused;
+    this.publishCurrentRoomEnv();
+  }
+
+  public setServerClockOffset(offsetMs: number): void {
+    const safeOffset = Number.isFinite(offsetMs) ? offsetMs : 0;
+    const delta = safeOffset - this.serverTimeOffsetMs;
+    this.serverTimeOffsetMs = safeOffset;
+    this.timeAnchorMs += delta;
+  }
+
+  public setWorldRole(isHost: boolean, hasSameMapTeammates: boolean): void {
+    const prevHost = this.isWorldHost;
+    const prevMates = this.hasSameMapTeammates;
+    this.isWorldHost = isHost;
+    this.hasSameMapTeammates = hasSameMapTeammates;
+    if (this.worldReady && this.enemies) {
+      const isGuest = !isHost && hasSameMapTeammates;
+      this.enemies.setRemoteControlled(isGuest);
+      if (isGuest && (!prevMates || prevHost) && this.lastRemoteWorldEnemies && this.lastRemoteWorldEnemies.length > 0) {
+        this.enemies.applyNetState(this.lastRemoteWorldEnemies, this.character.state.position);
+      }
+    }
+    if (isHost && hasSameMapTeammates && (!prevHost || !prevMates)) {
+      this.pendingEnemySyncForce = true;
+      if (this.worldReady && !prevMates) {
+        this.publishCurrentRoomEnv();
+      }
+    }
+  }
+
+  public publishCurrentRoomEnv(): void {
+    if (!this.worldReady) return;
+    const currentHour = this.timeHours;
+    const nowMs = this.getServerNowMs();
+    this.timeAnchorHours = currentHour;
+    this.timeAnchorMs = nowMs;
+    this.callbacks.onRoomEnvPublish?.(
+      {
+        weatherMode: this.weatherMode,
+        timeAnchorHours: currentHour,
+        timeAnchorMs: nowMs,
+        timePaused: this.timePaused,
+        campfireLit: this.weatherVfx.campfireLit,
+      },
+      this.isWorldHost ? this.enemies.exportNetState() : undefined
+    );
+  }
+
+  public applyRemoteWorldState(world: RoomWorldState): void {
+    if (!this.worldReady || world.mapId !== this.activeMapId) return;
+
+    if (world.weatherMode !== this.weatherMode) {
+      this.weatherMode = world.weatherMode;
+      this.weatherVfx.setWeatherMode(world.weatherMode);
+    }
+
+    this.timeAnchorHours = ((world.timeAnchorHours % 24) + 24) % 24;
+    this.timeAnchorMs = world.timeAnchorMs;
+    this.timePaused = world.timePaused;
+    if (this.timePaused) {
+      this.timeHours = this.timeAnchorHours;
+    } else {
+      const elapsedSec = Math.max(0, (this.getServerNowMs() - this.timeAnchorMs) / 1000);
+      this.timeHours = (((this.timeAnchorHours + elapsedSec * this.timeSpeed) % 24) + 24) % 24;
+    }
+
+    if (this.weatherVfx.campfireLit !== world.campfireLit) {
+      this.weatherVfx.setCampfireLit(world.campfireLit);
+    }
+
+    this.callbacks.onSyncedEnvChange?.({
+      weatherMode: this.weatherMode,
+      timePaused: this.timePaused,
+      timeHours: this.timeHours,
+      campfireLit: this.weatherVfx.campfireLit,
+    });
+
+    if (world.enemies.length > 0) {
+      this.lastRemoteWorldEnemies = world.enemies;
+      if (!this.isWorldHost && this.hasSameMapTeammates) {
+        this.enemies.applyNetState(world.enemies, this.character.state.position);
+      }
+    }
+  }
+
+  public applyRemoteEnemyHit(hit: RoomEnemyHitEvent): void {
+    if (!this.worldReady || this.isSwitchingMap || hit.mapId !== this.activeMapId) return;
+    if (!this.isWorldHost) return;
+    const applied = this.enemies.applyRemoteHit(
+      hit.enemyId,
+      hit.damage,
+      hit.dirX,
+      hit.dirZ,
+      hit.heavy,
+      this.character.state.position
+    );
+    if (applied) {
+      this.pendingEnemySyncForce = true;
+    }
   }
 
   public setLookSensitivity(value: number): void {
@@ -1050,7 +1213,10 @@ export class SurvivalEngine {
     setActiveWorldMap(mapId);
     const mapDef = getWorldMapDef(mapId);
     if (!this.worldReady) {
+      this.weatherMode = mapDef.defaultWeather;
       this.timeHours = mapDef.defaultTimeHours;
+      this.timeAnchorHours = mapDef.defaultTimeHours;
+      this.timeAnchorMs = this.getServerNowMs();
       this.camYaw = mapDef.spawn.yaw;
       this.prevCamYaw = mapDef.spawn.yaw;
       return;
@@ -1093,13 +1259,21 @@ export class SurvivalEngine {
         this.world.totemAnchors
       );
       this.enemies = createEnemySystem(this.scene, mapDef.id);
+      this.enemies.setRemoteControlled(!this.isWorldHost && this.hasSameMapTeammates);
+      this.lastRemoteWorldEnemies = null;
+      this.lastEnemyStateSig = '';
+      this.pendingEnemySyncForce = true;
       this.health = 100;
       this.playerHitFlash = 0;
       this.hasActiveWorldEntities = true;
 
       this.weatherVfx.setCampfirePos(this.world.campfirePos);
+      this.weatherVfx.setCampfireLit(true);
+      this.weatherMode = mapDef.defaultWeather;
       this.weatherVfx.setWeatherMode(mapDef.defaultWeather);
       this.timeHours = mapDef.defaultTimeHours;
+      this.timeAnchorHours = mapDef.defaultTimeHours;
+      this.timeAnchorMs = this.getServerNowMs();
 
       this.introTimer = 2.0;
       const switchAngle = Math.random() * Math.PI * 2;
@@ -1240,9 +1414,12 @@ export class SurvivalEngine {
     return { x: rx, z: rz };
   };
 
-  private updateAtmosphereAndLighting(dt: number, inCave: number): { nightFactor: number } {
+  private updateAtmosphereAndLighting(_dt: number, inCave: number): { nightFactor: number } {
     if (!this.timePaused) {
-      this.timeHours = (this.timeHours + dt * this.timeSpeed) % 24;
+      const elapsedSec = Math.max(0, (this.getServerNowMs() - this.timeAnchorMs) / 1000);
+      this.timeHours = (((this.timeAnchorHours + elapsedSec * this.timeSpeed) % 24) + 24) % 24;
+    } else {
+      this.timeHours = ((this.timeAnchorHours % 24) + 24) % 24;
     }
 
     // Sun angle: 6:00 = sunrise (0), 12:00 = zenith (PI/2), 18:00 = sunset (PI)
@@ -1591,8 +1768,37 @@ export class SurvivalEngine {
             this.health = Math.min(100, this.health + 18);
             this.stamina = Math.min(100, this.stamina + 25);
           }
+          if (res.enemyHit) {
+            if (!this.isWorldHost && this.hasSameMapTeammates) {
+              this.callbacks.onEnemyHitSend?.({
+                enemyId: res.enemyHit.enemyId,
+                damage: res.enemyHit.damage,
+                dirX: res.enemyHit.dirX,
+                dirZ: res.enemyHit.dirZ,
+                heavy: res.enemyHit.isHeavy,
+              });
+            } else if (this.isWorldHost && this.hasSameMapTeammates) {
+              this.pendingEnemySyncForce = true;
+            }
+          }
         }
       }
+    }
+
+    // Build active teammate position list on this map for co-op enemy aggro & target selection
+    this.allPlayerPositions.length = 0;
+    if (this.entered) {
+      this.allPlayerPositions.push(this.character.state.position);
+    }
+    let poolIdx = 0;
+    for (const rp of this.remotePlayers) {
+      if (rp.mapId !== this.activeMapId) continue;
+      if (poolIdx >= this.remotePosPool.length) {
+        this.remotePosPool.push(new THREE.Vector3());
+      }
+      const v = this.remotePosPool[poolIdx++];
+      v.set(rp.x, rp.y, rp.z);
+      this.allPlayerPositions.push(v);
     }
 
     // Update Hostile Enemies (Maxluqlar, Yovuz dushmanlar, Bosslar, Guruhlar, Mexaniklar)
@@ -1604,8 +1810,31 @@ export class SurvivalEngine {
       this.character.state.position,
       this.character.state.dodgeTimer > 0,
       this.character.state.isGuarding,
-      this.entered
+      this.entered,
+      this.allPlayerPositions
     );
+    if (enemyRes.coopKilledCount > 0) {
+      this.health = Math.min(this.maxHealth, this.health + 18 * enemyRes.coopKilledCount);
+      this.stamina = Math.min(100, this.stamina + 25 * enemyRes.coopKilledCount);
+    }
+    if (this.isWorldHost && this.hasSameMapTeammates && this.callbacks.onEnemyStatePublish) {
+      const nowMs = performance.now();
+      const force = this.pendingEnemySyncForce;
+      if (force || nowMs - this.lastEnemySyncAt >= 240) {
+        const netEnemies = this.enemies.exportNetState();
+        let sig = '';
+        for (let i = 0; i < netEnemies.length; i++) {
+          const en = netEnemies[i];
+          sig += `${en.id}:${Math.round(en.x * 2)}:${Math.round(en.z * 2)}:${en.hp}:${en.st}|`;
+        }
+        if (force || sig !== this.lastEnemyStateSig || nowMs - this.lastEnemySyncAt >= 1800) {
+          this.lastEnemySyncAt = nowMs;
+          this.lastEnemyStateSig = sig;
+          this.pendingEnemySyncForce = false;
+          this.callbacks.onEnemyStatePublish(netEnemies, force);
+        }
+      }
+    }
     if (enemyRes.bossShockwavePos) {
       this.combat.spawnImpactPulse(enemyRes.bossShockwavePos, 0xa855f7, 6.2, 16);
       this.cameraTrauma = Math.min(1, this.cameraTrauma + 0.35);
@@ -1667,7 +1896,7 @@ export class SurvivalEngine {
     // Update Combat VFX, Crates & Training Totems
     this.combat.update(simDt, this.elapsed);
 
-    // Update Weather, Campfire, Smoke & Particles
+    // Update Weather, Campfire, Smoke & Particles (clock-synced across peers)
     this.weatherVfx.update(
       simDt,
       this.elapsed,
@@ -1678,7 +1907,8 @@ export class SurvivalEngine {
       cfg.particleMultiplier,
       inCave,
       this.world.treePositions,
-      this.character.state.isSwimming
+      this.character.state.isSwimming,
+      this.getServerNowMs()
     );
 
     // Update Living Wildlife & Insects
