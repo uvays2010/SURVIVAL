@@ -318,6 +318,7 @@ export class MultiplayerClient {
   private cloudSessionId: string;
   private cloudColorIdx: number;
   private cloudPlayerDocCreated = false;
+  private cloudRoomReady = false;
   private cloudJoinSeq = 0;
   private cloudWriteInFlight = false;
   private cloudDirtyPending = false;
@@ -456,6 +457,7 @@ export class MultiplayerClient {
   private teardownCloud(): void {
     this.cloudJoinSeq++;
     this.cloudPlayerDocCreated = false;
+    this.cloudRoomReady = false;
     this.worldDocExists = false;
     this.worldWriteInFlight = false;
     this.pendingEnemiesSnapshot = null;
@@ -605,6 +607,7 @@ export class MultiplayerClient {
     }
 
     if (this.disposed || seq !== this.cloudJoinSeq) return;
+    this.cloudRoomReady = true;
 
     // 2. Register own session document in /rooms/{roomId}/players/{sessionId}
     const playerPath = `rooms/${activeRoom}/players/${this.cloudSessionId}`;
@@ -1528,7 +1531,7 @@ export class MultiplayerClient {
     initialEnemies?: EnemyNetItem[]
   ): Promise<void> {
     const user = this.currentUser;
-    if (this.disposed || !user || this.mode !== 'cloud') return;
+    if (this.disposed || !user || this.mode !== 'cloud' || !this.cloudRoomReady) return;
     const worldPath = `rooms/${this.roomId}/worlds/${targetMapId}`;
     const worldRef = doc(db, 'rooms', this.roomId, 'worlds', targetMapId);
 
@@ -1630,7 +1633,7 @@ export class MultiplayerClient {
 
   private async flushCloudEnemies(targetMapId: WorldMapId, enemies: EnemyNetItem[]): Promise<void> {
     const user = this.currentUser;
-    if (this.disposed || !user || this.mode !== 'cloud') return;
+    if (this.disposed || !user || this.mode !== 'cloud' || !this.cloudRoomReady) return;
     this.worldWriteInFlight = true;
     this.lastEnemiesSentAt = performance.now();
 
@@ -1714,6 +1717,7 @@ export class MultiplayerClient {
     const heavy = Boolean(hit.heavy);
 
     if (this.mode === 'cloud' && this.currentUser) {
+      if (!this.cloudRoomReady) return;
       const hitId = `h_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
       const hitPath = `rooms/${this.roomId}/hits/${hitId}`;
       const hitRef = doc(db, 'rooms', this.roomId, 'hits', hitId);

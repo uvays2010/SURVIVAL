@@ -256,7 +256,7 @@ service cloud.firestore {
         allow get: if isVerifiedUser()
           && isValidRoomId(roomId)
           && isValidSessionId(playerId)
-          && existing().roomId == roomId;
+          && (resource == null || existing().roomId == roomId);
 
         allow list: if isVerifiedUser()
           && resource.data.roomId == roomId;
@@ -295,7 +295,7 @@ service cloud.firestore {
         allow get: if isVerifiedUser()
           && isValidRoomId(roomId)
           && isValidSessionId(messageId)
-          && existing().roomId == roomId;
+          && (resource == null || existing().roomId == roomId);
 
         allow list: if isVerifiedUser()
           && resource.data.roomId == roomId;
@@ -320,7 +320,7 @@ service cloud.firestore {
         allow get: if isVerifiedUser()
           && isValidRoomId(roomId)
           && isValidMapId(mapId)
-          && existing().roomId == roomId;
+          && (resource == null || existing().roomId == roomId);
 
         allow list: if isVerifiedUser()
           && resource.data.roomId == roomId;
@@ -369,7 +369,7 @@ service cloud.firestore {
         allow get: if isVerifiedUser()
           && isValidRoomId(roomId)
           && isValidSessionId(hitId)
-          && existing().roomId == roomId;
+          && (resource == null || existing().roomId == roomId);
 
         allow list: if isVerifiedUser()
           && resource.data.roomId == roomId;
