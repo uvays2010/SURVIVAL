@@ -62,20 +62,20 @@ export const GameEntryOverlay: React.FC<GameEntryOverlayProps> = ({
         <div className="absolute inset-0 bg-gradient-to-t from-[#0b0e11] via-[#0b0e11]/65 to-[#0b0e11]/45" />
       </div>
 
-      {/* Top Row: Clean Brand Mark, Language Switcher & Install Action */}
-      <header className="relative z-10 flex items-center justify-between gap-3 px-4 py-3 sm:px-10 sm:py-5">
-        <div className="flex items-center gap-3 min-w-0">
+      {/* Top Row: Compact Brand Mark, Language Switcher & Install Action */}
+      <header className="relative z-10 flex items-center justify-between gap-2 px-3.5 py-2.5 sm:px-8 sm:py-4">
+        <div className="flex items-center gap-2 min-w-0">
           <img
             src="/pwa-192x192.png"
             alt={t.gameTitle}
-            className="w-8 h-8 sm:w-9 sm:h-9 rounded-lg border border-white/15 shrink-0"
+            className="w-6 h-6 sm:w-7 sm:h-7 rounded-md border border-white/15 shrink-0"
           />
-          <span className="font-display text-sm sm:text-lg font-semibold tracking-wider text-stone-100 whitespace-nowrap truncate">
+          <span className="font-display text-xs sm:text-sm font-semibold tracking-wider text-stone-100 whitespace-nowrap truncate">
             {t.gameTitle}
           </span>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-1.5 shrink-0">
           <div
             className="flex items-center rounded-md bg-[#10161e]/90 p-0.5 border border-white/15"
             role="group"
@@ -86,7 +86,7 @@ export const GameEntryOverlay: React.FC<GameEntryOverlayProps> = ({
                 key={item.code}
                 type="button"
                 onClick={() => onLangChange(item.code)}
-                className={`px-2 py-1 text-[11px] font-semibold rounded transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                className={`px-1.5 py-0.5 text-[10px] font-semibold rounded transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                   lang === item.code
                     ? 'bg-amber-500 text-stone-950'
                     : 'text-stone-300 hover:text-white hover:bg-white/5'
@@ -102,22 +102,22 @@ export const GameEntryOverlay: React.FC<GameEntryOverlayProps> = ({
       </header>
 
       {/* Center / Bottom Launch & Loading Panel */}
-      <main className="relative z-10 mx-auto flex w-full max-w-4xl flex-1 flex-col justify-end px-5 pb-5 pt-2 sm:px-10 sm:pb-10">
-        <div className="max-w-2xl">
-          <div className="flex items-center gap-2 text-xs text-amber-300/95 font-medium">
-            <Compass className="w-3.5 h-3.5 shrink-0" />
+      <main className="relative z-10 mx-auto flex w-full max-w-3xl flex-1 flex-col justify-end px-4 pb-4 pt-2 sm:px-8 sm:pb-8">
+        <div className="max-w-xl">
+          <div className="flex items-center gap-1.5 text-[10px] sm:text-[11px] text-amber-300/95 font-medium">
+            <Compass className="w-3 h-3 shrink-0" />
             <span>{t.subtitleBadge}</span>
           </div>
 
-          <h2 className="mt-1.5 font-display text-2xl sm:text-5xl font-bold tracking-wide text-white [text-wrap:balance]">
+          <h2 className="mt-1 font-display text-lg sm:text-3xl font-bold tracking-wide text-white [text-wrap:balance]">
             {t.gameTitle}
           </h2>
 
-          <p className="mt-2 text-xs sm:text-base text-stone-300 leading-relaxed max-w-xl hidden sm:block">
+          <p className="mt-1.5 text-[11px] sm:text-xs text-stone-300 leading-relaxed max-w-lg hidden sm:block">
             {t.heroDescription}
           </p>
 
-          <div className="mt-2 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] sm:text-xs text-stone-400">
+          <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] sm:text-[11px] text-stone-400">
             <span>{t.heroTags[0]}</span>
             <span aria-hidden="true">·</span>
             <span>{t.heroTags[1]}</span>
@@ -127,16 +127,16 @@ export const GameEntryOverlay: React.FC<GameEntryOverlayProps> = ({
         </div>
 
         {/* Graphics Preset + Audio Row */}
-        <div className="mt-4 sm:mt-6 flex flex-wrap items-center justify-between gap-2.5 border-t border-white/10 pt-3.5">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs text-stone-400 whitespace-nowrap">{t.graphicsLabel}</span>
-            <div className="flex flex-wrap items-center gap-1 rounded-lg bg-[#10161e]/90 p-1 border border-white/10">
+        <div className="mt-3 sm:mt-5 flex flex-wrap items-center justify-between gap-2 border-t border-white/10 pt-2.5 sm:pt-3">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[10px] sm:text-[11px] text-stone-400 whitespace-nowrap">{t.graphicsLabel}</span>
+            <div className="flex flex-wrap items-center gap-0.5 rounded-md bg-[#10161e]/90 p-0.5 border border-white/10">
               {QUALITY_OPTIONS.map((q) => (
                 <button
                   key={q}
                   type="button"
                   onClick={() => onQualityChange(q)}
-                  className={`px-2 py-1 text-[11px] sm:text-xs font-medium rounded-md transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                  className={`px-1.5 py-0.5 sm:px-2 sm:py-1 text-[10px] sm:text-[11px] font-medium rounded transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                     quality === q
                       ? 'bg-amber-500 text-stone-950 font-semibold'
                       : 'text-stone-300 hover:text-white hover:bg-white/5'
@@ -151,27 +151,27 @@ export const GameEntryOverlay: React.FC<GameEntryOverlayProps> = ({
           <button
             type="button"
             onClick={onToggleAudioOnStart}
-            className="flex items-center gap-2 rounded-lg border border-white/15 bg-[#10161e]/90 px-3 py-1.5 sm:px-3.5 sm:py-2 text-xs font-medium text-stone-200 hover:bg-[#1a222e] transition-colors cursor-pointer whitespace-nowrap shrink-0"
+            className="flex items-center gap-1.5 rounded-md border border-white/15 bg-[#10161e]/90 px-2.5 py-1 sm:px-3 sm:py-1.5 text-[10px] sm:text-[11px] font-medium text-stone-200 hover:bg-[#1a222e] transition-colors cursor-pointer whitespace-nowrap shrink-0"
           >
             {audioEnabledOnStart ? (
-              <Volume2 className="w-3.5 h-3.5 text-emerald-400" />
+              <Volume2 className="w-3 h-3 text-emerald-400" />
             ) : (
-              <VolumeX className="w-3.5 h-3.5 text-stone-400" />
+              <VolumeX className="w-3 h-3 text-stone-400" />
             )}
             <span>{audioEnabledOnStart ? t.audioOnLabel : t.audioMutedLabel}</span>
           </button>
         </div>
 
         {/* Loading Progress Track & Primary Launch Action */}
-        <div className="mt-3 sm:mt-5 flex flex-col gap-3">
-          <div className="flex flex-col gap-1.5">
-            <div className="flex items-center justify-between gap-4 text-xs sm:text-sm">
+        <div className="mt-2.5 sm:mt-4 flex flex-col gap-2.5">
+          <div className="flex flex-col gap-1">
+            <div className="flex items-center justify-between gap-3 text-[11px] sm:text-xs">
               <span className="text-stone-200 font-medium truncate">{translatedStage}</span>
               <span className="font-mono-num text-amber-400 font-semibold shrink-0">
                 {progress.percent}%
               </span>
             </div>
-            <div className="h-2 w-full overflow-hidden rounded-full bg-white/12">
+            <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/12">
               <div
                 className="h-full rounded-full bg-gradient-to-r from-amber-500 to-amber-300 transition-[width] duration-300 ease-out"
                 style={{ width: `${Math.min(100, Math.max(4, progress.percent))}%` }}
@@ -179,18 +179,18 @@ export const GameEntryOverlay: React.FC<GameEntryOverlayProps> = ({
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3 pt-0.5">
+          <div className="flex flex-wrap items-center gap-2.5 pt-0.5">
             <button
               type="button"
               disabled={!progress.ready}
               onClick={onEnterWorld}
-              className={`flex items-center justify-center gap-2.5 px-6 py-2.5 sm:px-7 sm:py-3 rounded-lg text-sm sm:text-base font-semibold transition-colors whitespace-nowrap shrink-0 ${
+              className={`flex items-center justify-center gap-2 px-4 py-2 sm:px-5 sm:py-2.5 rounded-lg text-xs sm:text-sm font-semibold transition-colors whitespace-nowrap shrink-0 ${
                 progress.ready
                   ? 'bg-amber-500 hover:bg-amber-400 text-stone-950 shadow-lg cursor-pointer'
                   : 'bg-stone-800 text-stone-400 cursor-wait'
               }`}
             >
-              <Play className="w-4 h-4 fill-current" />
+              <Play className="w-3.5 h-3.5 fill-current" />
               <span>{progress.ready ? t.enterWorld : t.loadingWorld}</span>
             </button>
 

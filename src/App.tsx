@@ -7,6 +7,7 @@ import {
   Compass,
   Flashlight,
   Gamepad2,
+  Heart,
   MapPin,
   Pause,
   Play,
@@ -153,6 +154,8 @@ export default function App() {
     playerX: -16,
     playerZ: 76,
     speedMs: 0,
+    health: 100,
+    maxHealth: 100,
     stamina: 100,
     warmth: 90,
     hydration: 92,
@@ -164,6 +167,10 @@ export default function App() {
     flashlightOn: false,
     fps: 60,
     isPointerLocked: false,
+    defeatedCount: 0,
+    activeEnemyTarget: null,
+    playerHitFlash: 0,
+    respawnBannerTimer: 0,
   });
 
   useEffect(() => {
@@ -285,6 +292,7 @@ export default function App() {
 
   const isPortrait = viewport.height > viewport.width;
   const virtualLandscape = touchMode && landscapeMode && isPortrait;
+  const compactHud = touchMode || viewport.width < 820 || viewport.height < 520;
 
   useEffect(() => {
     engineRef.current?.setVirtualLandscape(virtualLandscape);
@@ -550,14 +558,22 @@ export default function App() {
 
       {/* Top-Left Minimal Expedition Readout & Vitals */}
       <div
-        className="pointer-events-none absolute top-3 left-3 sm:top-4 sm:left-5 z-10 flex flex-col gap-1.5 sm:gap-2"
-        style={{ maxWidth: 'calc(100% - 178px)' }}
+        className={`pointer-events-none absolute z-10 flex flex-col ${
+          compactHud ? 'top-2 left-2.5 gap-1' : 'top-4 left-5 gap-2'
+        }`}
+        style={{ maxWidth: compactHud ? 'calc(100% - 140px)' : 'calc(100% - 190px)' }}
       >
         <div className="flex flex-col">
-          <h1 className="font-display text-sm sm:text-lg font-semibold leading-tight tracking-wider text-stone-100 drop-shadow-[0_1px_4px_rgba(0,0,0,0.85)]">
-            {t.gameTitle}
-          </h1>
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] sm:text-xs text-stone-200/90 drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)]">
+          {!compactHud && (
+            <h1 className="font-display text-lg font-semibold leading-tight tracking-wider text-stone-100 drop-shadow-[0_1px_4px_rgba(0,0,0,0.85)]">
+              {t.gameTitle}
+            </h1>
+          )}
+          <div
+            className={`flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-stone-200/90 drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)] ${
+              compactHud ? 'text-[9.5px] leading-tight' : 'text-xs'
+            }`}
+          >
             <span className="font-medium text-amber-300">
               {t.biomes[telemetry.biomeLabel] ?? telemetry.biomeLabel}
             </span>
@@ -565,12 +581,16 @@ export default function App() {
             <span className="font-mono-num">{formatTime(telemetry.timeHours)}</span>
             <span aria-hidden="true">·</span>
             <span>{t.weatherStatus[telemetry.weatherLabel] ?? telemetry.weatherLabel}</span>
-            <span aria-hidden="true" className="hidden sm:inline">·</span>
-            <span className="font-mono-num hidden sm:inline">
-              {t.cardinals[Math.round(telemetry.headingDeg / 45) % 8]} {telemetry.headingDeg}°
-            </span>
-            <span aria-hidden="true" className="hidden sm:inline">·</span>
-            <span className="font-mono-num hidden sm:inline">{telemetry.elevation.toFixed(1)}m</span>
+            {!compactHud && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span className="font-mono-num">
+                  {t.cardinals[Math.round(telemetry.headingDeg / 45) % 8]} {telemetry.headingDeg}°
+                </span>
+                <span aria-hidden="true">·</span>
+                <span className="font-mono-num">{telemetry.elevation.toFixed(1)}m</span>
+              </>
+            )}
             <span aria-hidden="true">·</span>
             <span className="font-mono-num text-stone-300">
               {telemetry.fps} {t.fpsSuffix}
@@ -578,29 +598,172 @@ export default function App() {
           </div>
         </div>
 
-        {/* Minimal Survival Vitals Bars */}
-        <div className="mt-0.5 flex flex-wrap items-center gap-2.5 sm:gap-4 bg-[#0c1015]/82 px-2.5 sm:px-3 py-1 sm:py-1.5 border border-white/10 rounded-md w-fit">
-          <VitalBar label={t.vitals.stamina} value={telemetry.stamina} colorClass="bg-emerald-400" />
-          <VitalBar label={t.vitals.warmth} value={telemetry.warmth} colorClass="bg-amber-400" />
-          <VitalBar label={t.vitals.hydration} value={telemetry.hydration} colorClass="bg-sky-400" />
+        {/* Prominent Player HP (Jon) + Secondary Survival Vitals */}
+        <div
+          className={`flex flex-col border rounded-md w-fit shadow-lg ${
+            compactHud ? 'gap-1 bg-[#0c1015]/78 px-2 py-1' : 'mt-0.5 gap-1.5 bg-[#0c1015]/90 px-3 py-2'
+          } ${telemetry.health <= 30 ? 'border-rose-500/70' : 'border-white/12'}`}
+        >
+          <div className={`flex items-center ${compactHud ? 'gap-1.5' : 'gap-2'}`}>
+            <Heart
+              className={`shrink-0 ${compactHud ? 'w-3 h-3' : 'w-4 h-4'} ${
+                telemetry.health <= 30 ? 'text-rose-400 fill-rose-500' : 'text-rose-500 fill-rose-500'
+              }`}
+            />
+            <span className={`font-semibold text-stone-100 ${compactHud ? 'text-[10px]' : 'text-xs'}`}>
+              {t.vitals.health}
+            </span>
+            <div
+              className={`bg-white/15 rounded-sm overflow-hidden ${
+                compactHud ? 'w-20 h-1.5' : 'w-40 h-2.5'
+              }`}
+            >
+              <div
+                className="h-full transition-all duration-150 bg-gradient-to-r from-rose-600 to-rose-400"
+                style={{
+                  width: `${Math.max(0, Math.min(100, (telemetry.health / Math.max(1, telemetry.maxHealth)) * 100))}%`,
+                }}
+              />
+            </div>
+            <span
+              className={`font-mono-num font-bold text-rose-200 whitespace-nowrap ${
+                compactHud ? 'text-[10px]' : 'text-xs'
+              }`}
+            >
+              {telemetry.health}/{telemetry.maxHealth}
+            </span>
+          </div>
+
+          <div
+            className={`flex flex-wrap items-center border-t border-white/8 ${
+              compactHud ? 'gap-2 pt-0.5' : 'gap-3.5 pt-1'
+            }`}
+          >
+            <VitalBar label={t.vitals.stamina} value={telemetry.stamina} colorClass="bg-emerald-400" compact={compactHud} />
+            <VitalBar label={t.vitals.warmth} value={telemetry.warmth} colorClass="bg-amber-400" compact={compactHud} />
+            <VitalBar label={t.vitals.hydration} value={telemetry.hydration} colorClass="bg-sky-400" compact={compactHud} />
+            {telemetry.defeatedCount > 0 && (
+              <span
+                className={`flex items-center gap-1 border-l border-white/12 font-mono-num text-amber-300 ${
+                  compactHud ? 'pl-1.5 text-[9.5px]' : 'pl-2.5 text-[11px]'
+                }`}
+              >
+                <Swords className={compactHud ? 'w-2.5 h-2.5' : 'w-3 h-3'} />
+                {telemetry.defeatedCount}
+              </span>
+            )}
+          </div>
         </div>
       </div>
 
+      {/* Respawn Notification Banner */}
+      {enteredWorld && !webglError && telemetry.respawnBannerTimer > 0 && (
+        <div
+          className={`pointer-events-none fixed left-1/2 -translate-x-1/2 z-25 bg-[#160b10]/94 border border-rose-500/60 rounded-md font-semibold text-rose-200 shadow-2xl whitespace-nowrap ${
+            compactHud ? 'top-11 px-3 py-1 text-[11px]' : 'top-24 px-4 py-2 text-sm'
+          }`}
+        >
+          {t.enemies.respawnedNotice}
+        </div>
+      )}
+
+      {/* Subtle Crimson Damage Vignette on Player Hit */}
+      {telemetry.playerHitFlash > 0.05 && (
+        <div
+          className="pointer-events-none fixed inset-0 z-20 transition-opacity duration-75"
+          style={{
+            opacity: Math.min(0.85, telemetry.playerHitFlash),
+            boxShadow: 'inset 0 0 95px 28px rgba(225, 29, 72, 0.55)',
+          }}
+        />
+      )}
+
+      {/* Top-Center Active Enemy / World Boss HP Bar */}
+      {enteredWorld && !webglError && telemetry.activeEnemyTarget && (
+        <div
+          className={`pointer-events-none fixed left-1/2 -translate-x-1/2 z-15 bg-[#0c1015]/86 border border-white/15 rounded-md shadow-xl ${
+            compactHud
+              ? isPortrait && !virtualLandscape
+                ? 'top-[68px] w-[min(210px,54vw)] px-2 py-1'
+                : 'top-2 w-[min(220px,40vw)] px-2 py-1'
+              : 'top-4 w-[min(320px,62vw)] px-3 py-1.5'
+          }`}
+        >
+          <div
+            className={`flex items-center justify-between gap-1.5 leading-tight ${
+              compactHud ? 'text-[9.5px] mb-0.5' : 'text-[11px] mb-1'
+            }`}
+          >
+            <div className="flex items-center gap-1 min-w-0">
+              <span
+                className={`font-semibold uppercase tracking-wider shrink-0 ${
+                  compactHud ? 'text-[8.5px]' : 'text-[10px]'
+                } ${
+                  telemetry.activeEnemyTarget.isBoss
+                    ? 'text-purple-300'
+                    : telemetry.activeEnemyTarget.category === 'mech'
+                    ? 'text-sky-300'
+                    : telemetry.activeEnemyTarget.category === 'squad'
+                    ? 'text-orange-300'
+                    : 'text-rose-300'
+                }`}
+              >
+                {telemetry.activeEnemyTarget.isBoss
+                  ? t.enemies.bossBadge
+                  : t.enemies.categories[telemetry.activeEnemyTarget.category]}
+              </span>
+              <span className="text-stone-100 font-medium truncate">
+                {t.enemies.names[telemetry.activeEnemyTarget.nameKey as keyof typeof t.enemies.names] ??
+                  telemetry.activeEnemyTarget.nameKey}
+              </span>
+            </div>
+            <span className={`font-mono-num text-stone-300 shrink-0 ${compactHud ? 'text-[8.5px]' : 'text-[10px]'}`}>
+              {telemetry.activeEnemyTarget.hp}/{telemetry.activeEnemyTarget.maxHp} · {telemetry.activeEnemyTarget.dist}m
+            </span>
+          </div>
+          <div className={`w-full bg-white/12 rounded-sm overflow-hidden ${compactHud ? 'h-1' : 'h-1.5'}`}>
+            <div
+              className={`h-full transition-all duration-100 ${
+                telemetry.activeEnemyTarget.isBoss
+                  ? 'bg-purple-500'
+                  : telemetry.activeEnemyTarget.category === 'mech'
+                  ? 'bg-sky-400'
+                  : telemetry.activeEnemyTarget.category === 'squad'
+                  ? 'bg-orange-400'
+                  : 'bg-rose-500'
+              }`}
+              style={{
+                width: `${Math.max(
+                  0,
+                  Math.min(100, (telemetry.activeEnemyTarget.hp / Math.max(1, telemetry.activeEnemyTarget.maxHp)) * 100)
+                )}%`,
+              }}
+            />
+          </div>
+        </div>
+      )}
+
       {/* Top-Right Compact Online, Landscape, Touch Pad & Audio Quick Toggles */}
-      <div className="absolute top-3 right-3 sm:top-4 sm:right-5 z-20 flex items-center gap-1.5">
+      <div
+        className={`absolute z-20 flex items-center ${
+          compactHud ? 'top-2 right-2.5 gap-1' : 'top-4 right-5 gap-1.5'
+        }`}
+      >
         <button
           type="button"
           onClick={handleOpenMultiplayer}
           aria-label={t.multiplayer.buttonLabel}
-          className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+          className={`flex items-center gap-1 rounded-md font-medium border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+            compactHud ? 'px-2 py-1 text-[10px]' : 'px-2.5 py-1.5 text-xs gap-1.5'
+          } ${
             mpOpen
               ? 'bg-amber-500 text-stone-950 border-amber-300'
-              : 'bg-[#0d1117]/86 text-stone-200 border-white/15 hover:bg-[#171e28]'
+              : 'bg-[#0d1117]/82 text-stone-200 border-white/15 hover:bg-[#171e28]'
           }`}
         >
-          <Users className="w-3.5 h-3.5 text-amber-400" />
-          <span className="hidden sm:inline">{t.multiplayer.buttonLabel}</span>
-          <span className="font-mono-num text-[11px] text-amber-300">
+          <Users className={compactHud ? 'w-3 h-3 text-amber-400' : 'w-3.5 h-3.5 text-amber-400'} />
+          {!compactHud && <span>{t.multiplayer.buttonLabel}</span>}
+          <span className={`font-mono-num text-amber-300 ${compactHud ? 'text-[10px]' : 'text-[11px]'}`}>
             {remotePlayers.length + 1}
           </span>
         </button>
@@ -610,14 +773,16 @@ export default function App() {
             type="button"
             onClick={handleToggleLandscape}
             aria-label={t.landscape}
-            className={`flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+            className={`flex items-center gap-1 rounded-md font-medium border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+              compactHud ? 'px-2 py-1 text-[10px]' : 'px-2.5 py-1.5 text-xs'
+            } ${
               landscapeMode
                 ? 'bg-sky-500 text-stone-950 border-sky-300'
-                : 'bg-[#0d1117]/86 text-stone-200 border-white/15 hover:bg-[#171e28]'
+                : 'bg-[#0d1117]/82 text-stone-200 border-white/15 hover:bg-[#171e28]'
             }`}
           >
-            <RotateCw className="w-3.5 h-3.5" />
-            <span className="hidden md:inline">{t.landscape}</span>
+            <RotateCw className={compactHud ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
+            {!compactHud && <span>{t.landscape}</span>}
           </button>
         )}
 
@@ -625,27 +790,35 @@ export default function App() {
           type="button"
           onClick={() => setTouchMode((prev) => !prev)}
           aria-label={touchMode ? t.touchOn : t.touchOff}
-          className={`flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+          className={`flex items-center gap-1 rounded-md font-medium border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+            compactHud ? 'px-2 py-1 text-[10px]' : 'px-2.5 py-1.5 text-xs'
+          } ${
             touchMode
               ? 'bg-amber-500 text-stone-950 border-amber-300'
-              : 'bg-[#0d1117]/86 text-stone-200 border-white/15 hover:bg-[#171e28]'
+              : 'bg-[#0d1117]/82 text-stone-200 border-white/15 hover:bg-[#171e28]'
           }`}
         >
-          <Gamepad2 className="w-3.5 h-3.5" />
-          <span className="hidden sm:inline">{touchMode ? t.touchOn : t.touchOff}</span>
+          <Gamepad2 className={compactHud ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
+          {!compactHud && <span>{touchMode ? t.touchOn : t.touchOff}</span>}
         </button>
 
         <button
           type="button"
           onClick={handleToggleAudio}
           aria-label={audioOn ? t.actions.audioOn : t.actions.audioOff}
-          className={`flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+          className={`flex items-center gap-1 rounded-md font-medium border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+            compactHud ? 'px-2 py-1 text-[10px]' : 'px-2.5 py-1.5 text-xs'
+          } ${
             audioOn
               ? 'bg-emerald-500 text-stone-950 border-emerald-300'
-              : 'bg-[#0d1117]/86 text-stone-200 border-white/15 hover:bg-[#171e28]'
+              : 'bg-[#0d1117]/82 text-stone-200 border-white/15 hover:bg-[#171e28]'
           }`}
         >
-          {audioOn ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
+          {audioOn ? (
+            <Volume2 className={compactHud ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
+          ) : (
+            <VolumeX className={compactHud ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
+          )}
         </button>
       </div>
 
@@ -686,7 +859,9 @@ export default function App() {
         biomeLabel={telemetry.biomeLabel}
         campfireLit={telemetry.campfireLit}
         lang={lang}
+        compact={compactHud}
         remotePlayers={remotePlayers}
+        enemyMarkers={engineRef.current?.getEnemyMarkers() ?? []}
         onTeleport={(id) => engineRef.current?.teleportToLandmark(id)}
         onSwitchMap={handleSwitchMap}
       />
@@ -746,103 +921,139 @@ export default function App() {
 
       {/* Unified Collapsible Bottom Control Dock */}
       <div
-        className={`fixed bottom-2 sm:bottom-4 left-1/2 -translate-x-1/2 z-30 flex flex-col items-center transition-transform duration-300 ease-out ${
-          dockOpen ? 'translate-y-0' : 'translate-y-[calc(100%-30px)]'
+        className={`fixed left-1/2 -translate-x-1/2 z-30 flex flex-col items-center transition-transform duration-300 ease-out ${
+          compactHud ? 'bottom-0.5' : 'bottom-4'
+        } ${
+          dockOpen
+            ? 'translate-y-0'
+            : compactHud
+            ? 'translate-y-[calc(100%-22px)]'
+            : 'translate-y-[calc(100%-30px)]'
         }`}
-        style={{ width: virtualLandscape ? 'min(760px, 92%)' : 'min(920px, 95%)' }}
+        style={{ width: compactHud ? 'min(520px, 88%)' : 'min(920px, 95%)' }}
       >
         {/* Collapse / Expand Handle */}
         <button
           type="button"
           onClick={() => setDockOpen((o) => !o)}
-          className="flex items-center gap-1.5 px-3.5 py-1 text-[11px] font-medium text-stone-200 bg-[#0d1117]/92 hover:bg-[#171d26] border border-b-0 border-white/15 rounded-t-md transition-colors cursor-pointer whitespace-nowrap shrink-0"
+          className={`flex items-center gap-1 font-medium text-stone-200 bg-[#0d1117]/88 hover:bg-[#171d26] border border-b-0 border-white/15 rounded-t-md transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+            compactHud ? 'px-2.5 py-0.5 text-[9.5px]' : 'px-3.5 py-1 text-[11px] gap-1.5'
+          }`}
         >
-          {dockOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5" />}
+          {dockOpen ? (
+            <ChevronDown className={compactHud ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
+          ) : (
+            <ChevronUp className={compactHud ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
+          )}
           <span>{dockOpen ? t.hideControls : t.showSettings}</span>
         </button>
 
         {/* Main Dock Panel (Solid/RGBA dark obsidian, zero backdrop-blur) */}
-        <div className="w-full max-h-[54%] overflow-y-auto touch-pan-y bg-[#0d1117]/95 border border-white/14 rounded-lg shadow-2xl p-2.5 sm:p-3 flex flex-col gap-2.5">
+        <div
+          className={`w-full overflow-y-auto touch-pan-y bg-[#0d1117]/94 border border-white/14 rounded-lg shadow-2xl flex flex-col ${
+            compactHud ? 'max-h-[40vh] p-1.5 gap-1.5' : 'max-h-[54%] p-3 gap-2.5'
+          }`}
+        >
           {/* Top Row: Tabs + Quick Action Buttons */}
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-2">
-            <div className="flex items-center gap-1 bg-[#161c24] p-0.5 rounded-md">
+          <div
+            className={`flex flex-wrap items-center justify-between border-b border-white/10 ${
+              compactHud ? 'gap-1 pb-1.5' : 'gap-2 pb-2'
+            }`}
+          >
+            <div className="flex items-center gap-0.5 sm:gap-1 bg-[#161c24] p-0.5 rounded-md overflow-x-auto max-w-full">
               <DockTabBtn
                 active={activeTab === 'GRAPHICS'}
                 onClick={() => setActiveTab('GRAPHICS')}
-                icon={<Sliders className="w-3.5 h-3.5" />}
+                icon={<Sliders className={compactHud ? 'w-3 h-3' : 'w-3.5 h-3.5'} />}
                 label={t.tabs.graphics}
+                compact={compactHud}
               />
               <DockTabBtn
                 active={activeTab === 'WEATHER'}
                 onClick={() => setActiveTab('WEATHER')}
-                icon={<CloudRain className="w-3.5 h-3.5" />}
+                icon={<CloudRain className={compactHud ? 'w-3 h-3' : 'w-3.5 h-3.5'} />}
                 label={t.tabs.weather}
+                compact={compactHud}
               />
               <DockTabBtn
                 active={activeTab === 'WORLD'}
                 onClick={() => setActiveTab('WORLD')}
-                icon={<MapPin className="w-3.5 h-3.5" />}
+                icon={<MapPin className={compactHud ? 'w-3 h-3' : 'w-3.5 h-3.5'} />}
                 label={t.tabs.world}
+                compact={compactHud}
               />
               <DockTabBtn
                 active={activeTab === 'CONTROLS'}
                 onClick={() => setActiveTab('CONTROLS')}
-                icon={<Compass className="w-3.5 h-3.5" />}
+                icon={<Compass className={compactHud ? 'w-3 h-3' : 'w-3.5 h-3.5'} />}
                 label={t.tabs.controls}
+                compact={compactHud}
               />
             </div>
 
             {/* Quick Interactive Gear & Combat Actions */}
-            <div className="flex flex-wrap items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() => engineRef.current?.triggerLightAttack()}
-                className="flex items-center gap-1 px-2.5 py-1.5 rounded text-xs font-medium bg-[#1a212b] text-amber-300 hover:bg-[#242e3b] transition-colors cursor-pointer whitespace-nowrap shrink-0"
-              >
-                <Swords className="w-3.5 h-3.5" />
-                <span>{t.actions.slash}</span>
-              </button>
+            <div className={`flex flex-wrap items-center ${compactHud ? 'gap-1' : 'gap-1.5'}`}>
+              {!compactHud && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => engineRef.current?.triggerLightAttack()}
+                    className="flex items-center gap-1 px-2.5 py-1.5 rounded text-xs font-medium bg-[#1a212b] text-amber-300 hover:bg-[#242e3b] transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    <Swords className="w-3.5 h-3.5" />
+                    <span>{t.actions.slash}</span>
+                  </button>
 
-              <button
-                type="button"
-                onClick={() => engineRef.current?.triggerHeavyAttack()}
-                className="flex items-center gap-1 px-2.5 py-1.5 rounded text-xs font-medium bg-[#1a212b] text-orange-300 hover:bg-[#242e3b] transition-colors cursor-pointer whitespace-nowrap shrink-0"
-              >
-                <span>{t.actions.cleave}</span>
-              </button>
+                  <button
+                    type="button"
+                    onClick={() => engineRef.current?.triggerHeavyAttack()}
+                    className="flex items-center gap-1 px-2.5 py-1.5 rounded text-xs font-medium bg-[#1a212b] text-orange-300 hover:bg-[#242e3b] transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    <span>{t.actions.cleave}</span>
+                  </button>
 
-              <button
-                type="button"
-                onClick={() => engineRef.current?.triggerDodge()}
-                className="flex items-center gap-1 px-2.5 py-1.5 rounded text-xs font-medium bg-[#1a212b] text-sky-300 hover:bg-[#242e3b] transition-colors cursor-pointer whitespace-nowrap shrink-0"
-              >
-                <Wind className="w-3.5 h-3.5" />
-                <span>{t.actions.dodge}</span>
-              </button>
+                  <button
+                    type="button"
+                    onClick={() => engineRef.current?.triggerDodge()}
+                    className="flex items-center gap-1 px-2.5 py-1.5 rounded text-xs font-medium bg-[#1a212b] text-sky-300 hover:bg-[#242e3b] transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                  >
+                    <Wind className="w-3.5 h-3.5" />
+                    <span>{t.actions.dodge}</span>
+                  </button>
+                </>
+              )}
 
               <button
                 type="button"
                 onClick={handleToggleFlashlight}
-                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                className={`flex items-center gap-1 rounded font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                  compactHud ? 'px-2 py-1 text-[10px]' : 'gap-1.5 px-2.5 py-1.5 text-xs'
+                } ${
                   telemetry.flashlightOn
                     ? 'bg-amber-500 text-stone-950'
                     : 'bg-[#1a212b] text-stone-200 hover:bg-[#232c38]'
                 }`}
               >
-                <Flashlight className="w-3.5 h-3.5" />
+                <Flashlight className={compactHud ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
                 <span>{t.actions.light}</span>
               </button>
 
               <button
                 type="button"
                 onClick={handleToggleAudio}
-                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                className={`flex items-center gap-1 rounded font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                  compactHud ? 'px-2 py-1 text-[10px]' : 'gap-1.5 px-2.5 py-1.5 text-xs'
+                } ${
                   audioOn
                     ? 'bg-emerald-500 text-stone-950'
                     : 'bg-[#1a212b] text-stone-200 hover:bg-[#232c38]'
                 }`}
               >
-                {audioOn ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
+                {audioOn ? (
+                  <Volume2 className={compactHud ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
+                ) : (
+                  <VolumeX className={compactHud ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
+                )}
                 <span>{audioOn ? t.actions.audioOn : t.actions.audioOff}</span>
               </button>
             </div>
@@ -850,17 +1061,21 @@ export default function App() {
 
           {/* Tab Content Area */}
           {activeTab === 'GRAPHICS' && (
-            <div className="flex flex-col gap-2">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-stone-400 whitespace-nowrap">{t.qualityPresetLabel}</span>
-                  <div className="flex items-center gap-1 bg-[#161c24] p-0.5 rounded-md">
+            <div className={`flex flex-col ${compactHud ? 'gap-1.5' : 'gap-2'}`}>
+              <div className={`flex flex-wrap items-center justify-between ${compactHud ? 'gap-1.5' : 'gap-2'}`}>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className={`text-stone-400 whitespace-nowrap ${compactHud ? 'text-[10px]' : 'text-xs'}`}>
+                    {t.qualityPresetLabel}
+                  </span>
+                  <div className="flex items-center gap-0.5 bg-[#161c24] p-0.5 rounded-md">
                     {QUALITY_LIST.map((q) => (
                       <button
                         key={q}
                         type="button"
                         onClick={() => handleQualityChange(q)}
-                        className={`px-2.5 py-1 text-xs font-medium rounded transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                        className={`font-medium rounded transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                          compactHud ? 'px-1.5 py-0.5 text-[10px]' : 'px-2.5 py-1 text-xs'
+                        } ${
                           quality === q
                             ? 'bg-amber-500 text-stone-950'
                             : 'text-stone-300 hover:text-white hover:bg-white/5'
@@ -871,10 +1086,12 @@ export default function App() {
                     ))}
                   </div>
                 </div>
-                <div className="text-xs text-stone-400 font-mono-num">{t.qualityDesc[quality]}</div>
+                {!compactHud && (
+                  <div className="text-xs text-stone-400 font-mono-num">{t.qualityDesc[quality]}</div>
+                )}
               </div>
 
-              <div className="flex flex-wrap items-center gap-1.5">
+              <div className={`flex flex-wrap items-center ${compactHud ? 'gap-1' : 'gap-1.5'}`}>
                 {(
                   [
                     { key: 'hdr', label: t.graphicsFlags.hdr },
@@ -889,7 +1106,9 @@ export default function App() {
                       key={item.key}
                       type="button"
                       onClick={() => handleToggleGraphicsFlag(item.key)}
-                      className={`px-2.5 py-1 rounded text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 border ${
+                      className={`rounded font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 border ${
+                        compactHud ? 'px-1.5 py-0.5 text-[10px]' : 'px-2.5 py-1 text-[11px]'
+                      } ${
                         active
                           ? 'bg-amber-500/20 text-amber-300 border-amber-400/40'
                           : 'bg-[#161c24] text-stone-400 border-white/8 hover:text-stone-200'
@@ -902,7 +1121,9 @@ export default function App() {
                 <button
                   type="button"
                   onClick={handleCycleAA}
-                  className={`px-2.5 py-1 rounded text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 border ${
+                  className={`rounded font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 border ${
+                    compactHud ? 'px-1.5 py-0.5 text-[10px]' : 'px-2.5 py-1 text-[11px]'
+                  } ${
                     graphicsFlags.antiAliasing !== 'OFF'
                       ? 'bg-sky-500/20 text-sky-300 border-sky-400/40'
                       : 'bg-[#161c24] text-stone-400 border-white/8 hover:text-stone-200'
@@ -915,15 +1136,17 @@ export default function App() {
           )}
 
           {activeTab === 'WEATHER' && (
-            <div className="flex flex-col gap-2">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-1 bg-[#161c24] p-0.5 rounded-md overflow-x-auto">
+            <div className={`flex flex-col ${compactHud ? 'gap-1.5' : 'gap-2'}`}>
+              <div className={`flex flex-wrap items-center justify-between ${compactHud ? 'gap-1.5' : 'gap-2'}`}>
+                <div className="flex items-center gap-0.5 bg-[#161c24] p-0.5 rounded-md overflow-x-auto max-w-full">
                   {WEATHER_IDS.map((wId) => (
                     <button
                       key={wId}
                       type="button"
                       onClick={() => handleWeatherChange(wId)}
-                      className={`px-2.5 py-1 text-xs font-medium rounded transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                      className={`font-medium rounded transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                        compactHud ? 'px-1.5 py-0.5 text-[10px]' : 'px-2.5 py-1 text-xs'
+                      } ${
                         weatherMode === wId
                           ? 'bg-amber-500 text-stone-950'
                           : 'text-stone-300 hover:text-white hover:bg-white/5'
@@ -934,11 +1157,13 @@ export default function App() {
                   ))}
                 </div>
 
-                <div className="flex items-center gap-1.5">
+                <div className="flex flex-wrap items-center gap-1">
                   <button
                     type="button"
                     onClick={handleToggleTimePause}
-                    className="flex items-center gap-1 px-2 py-1 rounded bg-[#1a212b] hover:bg-[#232c38] text-xs text-stone-200 cursor-pointer whitespace-nowrap shrink-0"
+                    className={`flex items-center gap-1 rounded bg-[#1a212b] hover:bg-[#232c38] text-stone-200 cursor-pointer whitespace-nowrap shrink-0 ${
+                      compactHud ? 'px-1.5 py-0.5 text-[10px]' : 'px-2 py-1 text-xs'
+                    }`}
                   >
                     {timePaused ? <Play className="w-3 h-3" /> : <Pause className="w-3 h-3" />}
                     <span>{timePaused ? t.timeControls.resume : t.timeControls.pause}</span>
@@ -953,7 +1178,9 @@ export default function App() {
                       key={p.label}
                       type="button"
                       onClick={() => handleTimeSlider(p.h)}
-                      className="px-2 py-1 rounded bg-[#1a212b] hover:bg-[#232c38] text-xs text-stone-300 hover:text-white cursor-pointer whitespace-nowrap shrink-0"
+                      className={`rounded bg-[#1a212b] hover:bg-[#232c38] text-stone-300 hover:text-white cursor-pointer whitespace-nowrap shrink-0 ${
+                        compactHud ? 'px-1.5 py-0.5 text-[10px]' : 'px-2 py-1 text-xs'
+                      }`}
                     >
                       {p.label}
                     </button>
@@ -961,9 +1188,11 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="flex items-center gap-3">
-                <Sun className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                <span className="text-xs text-stone-400 whitespace-nowrap">{t.timeControls.cycle24h}</span>
+              <div className="flex items-center gap-2">
+                <Sun className={compactHud ? 'w-3 h-3 text-amber-400 shrink-0' : 'w-3.5 h-3.5 text-amber-400 shrink-0'} />
+                <span className={`text-stone-400 whitespace-nowrap ${compactHud ? 'text-[10px]' : 'text-xs'}`}>
+                  {t.timeControls.cycle24h}
+                </span>
                 <input
                   type="range"
                   min={0}
@@ -973,7 +1202,7 @@ export default function App() {
                   onChange={(e) => handleTimeSlider(parseFloat(e.target.value))}
                   className="survival-slider flex-1"
                 />
-                <span className="font-mono-num text-xs text-stone-200 w-12 text-right">
+                <span className={`font-mono-num text-stone-200 text-right ${compactHud ? 'text-[10px] w-10' : 'text-xs w-12'}`}>
                   {formatTime(telemetry.timeHours)}
                 </span>
               </div>
@@ -981,17 +1210,19 @@ export default function App() {
           )}
 
           {activeTab === 'WORLD' && (
-            <div className="flex flex-col gap-2">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <Camera className="w-3.5 h-3.5 text-amber-400" />
-                  <div className="flex items-center gap-1 bg-[#161c24] p-0.5 rounded-md">
+            <div className={`flex flex-col ${compactHud ? 'gap-1.5' : 'gap-2'}`}>
+              <div className={`flex flex-wrap items-center justify-between ${compactHud ? 'gap-1.5' : 'gap-2'}`}>
+                <div className="flex items-center gap-1.5">
+                  <Camera className={compactHud ? 'w-3 h-3 text-amber-400' : 'w-3.5 h-3.5 text-amber-400'} />
+                  <div className="flex items-center gap-0.5 bg-[#161c24] p-0.5 rounded-md">
                     {(['THIRD_PERSON', 'FIRST_PERSON', 'CINEMATIC_ORBIT'] as CameraMode[]).map((camId) => (
                       <button
                         key={camId}
                         type="button"
                         onClick={() => handleCameraChange(camId)}
-                        className={`px-2.5 py-1 text-xs font-medium rounded transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                        className={`font-medium rounded transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                          compactHud ? 'px-1.5 py-0.5 text-[10px]' : 'px-2.5 py-1 text-xs'
+                        } ${
                           cameraMode === camId
                             ? 'bg-amber-500 text-stone-950'
                             : 'text-stone-300 hover:text-white hover:bg-white/5'
@@ -1009,7 +1240,9 @@ export default function App() {
                       key={lm.id}
                       type="button"
                       onClick={() => engineRef.current?.teleportToLandmark(lm.id)}
-                      className="px-2 py-1 rounded bg-[#1a212b] hover:bg-amber-500/20 hover:text-amber-300 text-xs text-stone-300 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                      className={`rounded bg-[#1a212b] hover:bg-amber-500/20 hover:text-amber-300 text-stone-300 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                        compactHud ? 'px-1.5 py-0.5 text-[10px]' : 'px-2 py-1 text-xs'
+                      }`}
                     >
                       {t.landmarks[lm.id] ?? lm.name}
                     </button>
@@ -1017,13 +1250,15 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="flex items-center gap-1.5 overflow-x-auto pt-1 border-t border-white/8">
+              <div className="flex items-center gap-1 overflow-x-auto pt-1 border-t border-white/8">
                 {WORLD_MAPS.map((m) => (
                   <button
                     key={m.id}
                     type="button"
                     onClick={() => handleSwitchMap(m.id)}
-                    className={`px-2 py-1 rounded text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                    className={`rounded font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                      compactHud ? 'px-1.5 py-0.5 text-[10px]' : 'px-2 py-1 text-[11px]'
+                    } ${
                       m.id === activeMapId
                         ? 'bg-amber-500 text-stone-950 font-semibold'
                         : 'bg-[#161c24] text-stone-300 hover:text-white hover:bg-white/10'
@@ -1037,9 +1272,11 @@ export default function App() {
           )}
 
           {activeTab === 'CONTROLS' && (
-            <div className="flex flex-col gap-2">
-              <div className="flex items-center gap-3">
-                <span className="text-xs text-stone-400 whitespace-nowrap">{t.controlsTab.lookSensitivity}</span>
+            <div className={`flex flex-col ${compactHud ? 'gap-1.5' : 'gap-2'}`}>
+              <div className="flex items-center gap-2">
+                <span className={`text-stone-400 whitespace-nowrap ${compactHud ? 'text-[10px]' : 'text-xs'}`}>
+                  {t.controlsTab.lookSensitivity}
+                </span>
                 <input
                   type="range"
                   min={0.5}
@@ -1049,11 +1286,15 @@ export default function App() {
                   onChange={(e) => handleSensitivityChange(parseFloat(e.target.value))}
                   className="survival-slider flex-1"
                 />
-                <span className="font-mono-num text-xs text-amber-300 w-10 text-right">
+                <span className={`font-mono-num text-amber-300 text-right ${compactHud ? 'text-[10px] w-8' : 'text-xs w-10'}`}>
                   {lookSensitivity.toFixed(1)}x
                 </span>
               </div>
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-stone-300">
+              <div
+                className={`flex flex-wrap items-center text-stone-300 ${
+                  compactHud ? 'gap-x-2.5 gap-y-0.5 text-[10px]' : 'gap-x-4 gap-y-1 text-xs'
+                }`}
+              >
                 <span>
                   <strong className="text-amber-300 font-mono-num">{t.controlsTab.moveKey}</strong> {t.controlsTab.moveDesc}
                 </span>
@@ -1090,11 +1331,21 @@ export default function App() {
   );
 }
 
-function VitalBar({ label, value, colorClass }: { label: string; value: number; colorClass: string }) {
+function VitalBar({
+  label,
+  value,
+  colorClass,
+  compact = false,
+}: {
+  label: string;
+  value: number;
+  colorClass: string;
+  compact?: boolean;
+}) {
   return (
-    <div className="flex items-center gap-1.5">
-      <span className="text-[11px] text-stone-300">{label}</span>
-      <div className="w-14 h-1.5 bg-white/12 rounded-sm overflow-hidden">
+    <div className="flex items-center gap-1">
+      <span className={compact ? 'text-[9px] text-stone-300' : 'text-[11px] text-stone-300'}>{label}</span>
+      <div className={`${compact ? 'w-8 h-1' : 'w-14 h-1.5'} bg-white/12 rounded-sm overflow-hidden`}>
         <div className={`h-full ${colorClass} transition-all duration-200`} style={{ width: `${value}%` }} />
       </div>
     </div>
@@ -1106,19 +1357,21 @@ function DockTabBtn({
   onClick,
   icon,
   label,
+  compact = false,
 }: {
   active: boolean;
   onClick: () => void;
   icon: React.ReactNode;
   label: string;
+  compact?: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-        active ? 'bg-[#26303d] text-white' : 'text-stone-400 hover:text-stone-200'
-      }`}
+      className={`flex items-center rounded font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+        compact ? 'gap-1 px-1.5 py-0.5 text-[10px]' : 'gap-1.5 px-2.5 py-1 text-xs'
+      } ${active ? 'bg-[#26303d] text-white' : 'text-stone-400 hover:text-stone-200'}`}
     >
       {icon}
       <span>{label}</span>

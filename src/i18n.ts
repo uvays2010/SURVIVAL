@@ -49,6 +49,7 @@ export interface TranslationBundle {
   gotIt: string;
   closeLabel: string;
   vitals: {
+    health: string;
     stamina: string;
     warmth: string;
     hydration: string;
@@ -212,6 +213,25 @@ export interface TranslationBundle {
     copyDomain: string;
     openFirebaseAuth: string;
   };
+  enemies: {
+    defeated: string;
+    bossBadge: string;
+    respawnedNotice: string;
+    categories: {
+      beast: string;
+      raider: string;
+      boss: string;
+      squad: string;
+      mech: string;
+    };
+    names: {
+      shadowBeast: string;
+      crimsonRaider: string;
+      abyssalBoss: string;
+      squadWarrior: string;
+      cyberMech: string;
+    };
+  };
   webglErrorFallback: string;
 }
 
@@ -248,6 +268,7 @@ export const TRANSLATIONS: Record<GameLang, TranslationBundle> = {
     gotIt: 'Tushunarli',
     closeLabel: 'O‘rnatish yo‘riqnomasini yopish',
     vitals: {
+      health: 'Jon',
       stamina: 'Quvvat',
       warmth: 'Issiqlik',
       hydration: 'Suv',
@@ -516,6 +537,25 @@ export const TRANSLATIONS: Record<GameLang, TranslationBundle> = {
       copyDomain: 'Domenni nusxalash',
       openFirebaseAuth: 'Firebase sozlamalarini ochish',
     },
+    enemies: {
+      defeated: 'Yo‘q qilindi',
+      bossBadge: 'BOSS',
+      respawnedNotice: 'Joningiz tugadi — Lagerga qaytdingiz',
+      categories: {
+        beast: 'Maxluq',
+        raider: 'Yovuz dushman',
+        boss: 'Kuchli Boss',
+        squad: 'Dushman guruhi',
+        mech: 'Mexanik raqib',
+      },
+      names: {
+        shadowBeast: 'Zulmat Maxlugi',
+        crimsonRaider: 'Yovuz Jangchi',
+        abyssalBoss: 'Voha Hukmdori Boss',
+        squadWarrior: 'Guruh Askarlari',
+        cyberMech: 'Temir Mexanik',
+      },
+    },
     webglErrorFallback: 'Ushbu qurilmada 3D WebGL grafikasi ishga tushmadi.',
   },
   ru: {
@@ -550,6 +590,7 @@ export const TRANSLATIONS: Record<GameLang, TranslationBundle> = {
     gotIt: 'Понятно',
     closeLabel: 'Закрыть инструкцию по установке',
     vitals: {
+      health: 'Здоровье',
       stamina: 'Сила',
       warmth: 'Тепло',
       hydration: 'Вода',
@@ -818,6 +859,25 @@ export const TRANSLATIONS: Record<GameLang, TranslationBundle> = {
       copyDomain: 'Копировать домен',
       openFirebaseAuth: 'Открыть настройки Firebase',
     },
+    enemies: {
+      defeated: 'Побеждено',
+      bossBadge: 'БОСС',
+      respawnedNotice: 'Здоровье закончилось — Вы вернулись в лагерь',
+      categories: {
+        beast: 'Монстр',
+        raider: 'Злой враг',
+        boss: 'Могучий босс',
+        squad: 'Отряд врагов',
+        mech: 'Механик',
+      },
+      names: {
+        shadowBeast: 'Теневой Монстр',
+        crimsonRaider: 'Злой Налётчик',
+        abyssalBoss: 'Повелитель Долины',
+        squadWarrior: 'Боец Отряда',
+        cyberMech: 'Боевой Мех',
+      },
+    },
     webglErrorFallback: 'WebGL графика недоступна на этом устройстве.',
   },
   en: {
@@ -852,6 +912,7 @@ export const TRANSLATIONS: Record<GameLang, TranslationBundle> = {
     gotIt: 'Got It',
     closeLabel: 'Close install guide',
     vitals: {
+      health: 'HP',
       stamina: 'Stam',
       warmth: 'Warm',
       hydration: 'Hydr',
@@ -1119,6 +1180,25 @@ export const TRANSLATIONS: Record<GameLang, TranslationBundle> = {
       authDomainDesc: 'To sign in from Vercel or a custom domain, add this hostname under Firebase Console -> Authentication -> Settings -> Authorized domains:',
       copyDomain: 'Copy domain',
       openFirebaseAuth: 'Open Firebase Auth Settings',
+    },
+    enemies: {
+      defeated: 'Defeated',
+      bossBadge: 'BOSS',
+      respawnedNotice: 'Defeated — Respawned at Camp',
+      categories: {
+        beast: 'Beast',
+        raider: 'Hostile',
+        boss: 'World Boss',
+        squad: 'Enemy Squad',
+        mech: 'Mech Unit',
+      },
+      names: {
+        shadowBeast: 'Shadow Beast',
+        crimsonRaider: 'Crimson Raider',
+        abyssalBoss: 'Abyssal Dreadlord',
+        squadWarrior: 'Squad Raider',
+        cyberMech: 'Sentinel Mech',
+      },
     },
     webglErrorFallback: 'WebGL context unavailable on this device.',
   },

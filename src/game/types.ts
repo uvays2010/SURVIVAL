@@ -313,6 +313,25 @@ export function getWorldMapDef(id: WorldMapId): WorldMapDef {
   return WORLD_MAPS.find((m) => m.id === id) ?? WORLD_MAPS[0];
 }
 
+export type EnemyCategory = 'beast' | 'raider' | 'boss' | 'squad' | 'mech';
+
+export interface EnemyHudTarget {
+  id: string;
+  category: EnemyCategory;
+  nameKey: string;
+  hp: number;
+  maxHp: number;
+  dist: number;
+  isBoss: boolean;
+}
+
+export interface EnemyMapMarker {
+  id: string;
+  x: number;
+  z: number;
+  category: EnemyCategory;
+}
+
 export interface HudTelemetry {
   activeMapId: WorldMapId;
   biomeLabel: string;
@@ -323,6 +342,8 @@ export interface HudTelemetry {
   playerX: number;
   playerZ: number;
   speedMs: number;
+  health: number;
+  maxHealth: number;
   stamina: number;
   warmth: number;
   hydration: number;
@@ -334,4 +355,8 @@ export interface HudTelemetry {
   flashlightOn: boolean;
   fps: number;
   isPointerLocked: boolean;
+  defeatedCount: number;
+  activeEnemyTarget: EnemyHudTarget | null;
+  playerHitFlash: number;
+  respawnBannerTimer: number;
 }

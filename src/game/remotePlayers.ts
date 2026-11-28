@@ -27,6 +27,15 @@ interface RemoteAvatarRig {
   yaw: number;
   walkPhase: number;
   swimPhase: number;
+  lastNetX: number;
+  lastNetY: number;
+  lastNetZ: number;
+  lastPacketPerf: number;
+  lastReceivedAt: number;
+  velX: number;
+  velY: number;
+  velZ: number;
+  smoothSpeed: number;
 }
 
 function drawRoundedRect(
@@ -174,7 +183,6 @@ export class RemotePlayersSystem {
 
     const hips = new THREE.Mesh(new THREE.CylinderGeometry(0.125, 0.148, 0.18, 12), this.sharedPantsMat);
     hips.scale.set(1.05, 1, 0.74);
-    hips.castShadow = true;
     pelvis.add(hips);
 
     const belt = new THREE.Mesh(new THREE.CylinderGeometry(0.132, 0.14, 0.06, 12), accentMat);
@@ -199,7 +207,6 @@ export class RemotePlayersSystem {
 
     const backpack = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.28, 0.12), this.sharedBootMat);
     backpack.position.set(0, 0.22, -0.145);
-    backpack.castShadow = true;
     torso.add(backpack);
 
     const head = new THREE.Group();
@@ -219,7 +226,6 @@ export class RemotePlayersSystem {
     const hairCap = new THREE.Mesh(new THREE.SphereGeometry(0.116, 14, 12), this.sharedHairMat);
     hairCap.scale.set(1.0, 1.02, 1.04);
     hairCap.position.set(0, 0.195, -0.015);
-    hairCap.castShadow = true;
     head.add(hairCap);
 
     const pony = new THREE.Group();
@@ -228,7 +234,6 @@ export class RemotePlayersSystem {
     const ponyMesh = new THREE.Mesh(new THREE.ConeGeometry(0.046, 0.34, 10), this.sharedHairMat);
     ponyMesh.rotation.x = Math.PI - 0.24;
     ponyMesh.position.set(0, -0.14, -0.04);
-    ponyMesh.castShadow = true;
     pony.add(ponyMesh);
 
     const buildArm = (side: number) => {
@@ -237,11 +242,9 @@ export class RemotePlayersSystem {
       torso.add(shoulder);
       const sleeve = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.034, 0.25, 10), this.sharedTunicMat);
       sleeve.position.y = -0.12;
-      sleeve.castShadow = true;
       shoulder.add(sleeve);
       const forearm = new THREE.Mesh(new THREE.CylinderGeometry(0.032, 0.026, 0.24, 10), this.sharedSkinMat);
       forearm.position.y = -0.35;
-      forearm.castShadow = true;
       shoulder.add(forearm);
       return shoulder;
     };
@@ -254,7 +257,6 @@ export class RemotePlayersSystem {
     rightArm.add(weaponPivot);
     const blade = new THREE.Mesh(new THREE.BoxGeometry(0.014, 0.04, 0.48), this.sharedMetalMat);
     blade.position.set(0, 0, 0.26);
-    blade.castShadow = true;
     weaponPivot.add(blade);
 
     const buildLeg = (side: number) => {
@@ -267,7 +269,6 @@ export class RemotePlayersSystem {
       hip.add(thigh);
       const boot = new THREE.Mesh(new THREE.CylinderGeometry(0.052, 0.042, 0.42, 10), this.sharedBootMat);
       boot.position.y = -0.62;
-      boot.castShadow = true;
       hip.add(boot);
       return hip;
     };
@@ -339,6 +340,15 @@ export class RemotePlayersSystem {
       yaw: player.yaw,
       walkPhase: 0,
       swimPhase: 0,
+      lastNetX: player.x,
+      lastNetY: player.y,
+      lastNetZ: player.z,
+      lastPacketPerf: performance.now(),
+      lastReceivedAt: player.receivedAt ?? 0,
+      velX: 0,
+      velY: 0,
+      velZ: 0,
+      smoothSpeed: player.speed,
     };
   }
 
@@ -364,6 +374,7 @@ export class RemotePlayersSystem {
 
   public update(dt: number, elapsed: number, activeMapId: WorldMapId, players: RemotePlayerState[]): void {
     const sameMapIds = new Set<string>();
+    const nowPerf = performance.now();
 
     for (const p of players) {
       if (p.mapId !== activeMapId) continue;
@@ -382,14 +393,81 @@ export class RemotePlayersSystem {
         rig.labelMat.needsUpdate = true;
       }
 
-      const lerpAlpha = 1 - Math.exp(-14 * dt);
-      rig.pos.x = THREE.MathUtils.lerp(rig.pos.x, p.x, lerpAlpha);
-      rig.pos.y = THREE.MathUtils.lerp(rig.pos.y, p.y, lerpAlpha);
-      rig.pos.z = THREE.MathUtils.lerp(rig.pos.z, p.z, lerpAlpha);
-      rig.yaw = shortestAngleLerp(rig.yaw, p.yaw, lerpAlpha);
+      // Detect fresh network packet arrival & compute smooth velocity dead-reckoning
+      const receivedAtVal = p.receivedAt ?? 0;
+      const packetArrived =
+        (receivedAtVal > 0 && receivedAtVal !== rig.lastReceivedAt) ||
+        p.x !== rig.lastNetX ||
+        p.y !== rig.lastNetY ||
+        p.z !== rig.lastNetZ;
+
+      if (packetArrived) {
+        const snapDt = THREE.MathUtils.clamp((nowPerf - rig.lastPacketPerf) / 1000, 0.045, 0.65);
+        const jumpDist = Math.hypot(p.x - rig.pos.x, p.z - rig.pos.z);
+
+        if (jumpDist > 12) {
+          // Teleport / respawn snap
+          rig.pos.set(p.x, p.y, p.z);
+          rig.velX = 0;
+          rig.velY = 0;
+          rig.velZ = 0;
+        } else {
+          const measVx = (p.x - rig.lastNetX) / snapDt;
+          const measVy = (p.y - rig.lastNetY) / snapDt;
+          const measVz = (p.z - rig.lastNetZ) / snapDt;
+          const headVx = -Math.sin(p.yaw) * p.speed;
+          const headVz = -Math.cos(p.yaw) * p.speed;
+
+          if (p.speed < 0.15 && Math.hypot(p.x - rig.lastNetX, p.z - rig.lastNetZ) < 0.08) {
+            rig.velX = 0;
+            rig.velY = 0;
+            rig.velZ = 0;
+          } else {
+            const blendVx = p.speed > 0.25 ? measVx * 0.65 + headVx * 0.35 : measVx;
+            const blendVz = p.speed > 0.25 ? measVz * 0.65 + headVz * 0.35 : measVz;
+            const horizMag = Math.hypot(blendVx, blendVz);
+            const clampScale = horizMag > 15 ? 15 / horizMag : 1;
+            rig.velX = blendVx * clampScale;
+            rig.velZ = blendVz * clampScale;
+            rig.velY = THREE.MathUtils.clamp(measVy, -12, 12);
+          }
+        }
+
+        rig.lastNetX = p.x;
+        rig.lastNetY = p.y;
+        rig.lastNetZ = p.z;
+        rig.lastPacketPerf = nowPerf;
+        rig.lastReceivedAt = receivedAtVal;
+      }
+
+      // Bounded velocity extrapolation between network packets so movement stays fluid at 60fps
+      const sincePacket = Math.max(0, (nowPerf - rig.lastPacketPerf) / 1000);
+      const leadTime = Math.min(sincePacket, 0.22) + Math.max(0, Math.min(sincePacket - 0.22, 0.24)) * 0.4;
+      const targetX = p.x + rig.velX * leadTime;
+      const targetZ = p.z + rig.velZ * leadTime;
+      const targetY = p.y + rig.velY * Math.min(sincePacket, 0.14);
+
+      const prevX = rig.pos.x;
+      const prevZ = rig.pos.z;
+      const posAlpha = 1 - Math.exp(-9.0 * dt);
+      const yAlpha = 1 - Math.exp(-11.5 * dt);
+      const yawAlpha = 1 - Math.exp(-10.5 * dt);
+
+      rig.pos.x = THREE.MathUtils.lerp(rig.pos.x, targetX, posAlpha);
+      rig.pos.y = THREE.MathUtils.lerp(rig.pos.y, targetY, yAlpha);
+      rig.pos.z = THREE.MathUtils.lerp(rig.pos.z, targetZ, posAlpha);
+      rig.yaw = shortestAngleLerp(rig.yaw, p.yaw, yawAlpha);
 
       rig.root.position.copy(rig.pos);
       rig.root.rotation.y = rig.yaw + Math.PI;
+
+      // Smooth visual locomotion speed from both reported speed and actual interpolated travel
+      const visualTravelSpeed = Math.hypot(rig.pos.x - prevX, rig.pos.z - prevZ) / Math.max(dt, 0.001);
+      const targetAnimSpeed =
+        p.speed < 0.15 && visualTravelSpeed < 0.3
+          ? 0
+          : Math.max(p.speed, Math.min(visualTravelSpeed, 12));
+      rig.smoothSpeed = THREE.MathUtils.damp(rig.smoothSpeed, targetAnimSpeed, 10, dt);
 
       // Procedural motion animation
       if (p.swim) {
@@ -403,8 +481,8 @@ export class RemotePlayersSystem {
         rig.rightLeg.rotation.x = -Math.sin(rig.swimPhase * 2) * 0.45;
         rig.pony.rotation.x = 0.4 + Math.sin(rig.swimPhase) * 0.14;
       } else {
-        const moveFactor = THREE.MathUtils.clamp(p.speed / 6.5, 0, 1);
-        rig.walkPhase += dt * (2.6 + p.speed * 1.45);
+        const moveFactor = THREE.MathUtils.clamp(rig.smoothSpeed / 6.5, 0, 1);
+        rig.walkPhase += dt * (2.6 + rig.smoothSpeed * 1.45);
         const swing = Math.sin(rig.walkPhase) * 0.65 * moveFactor;
 
         rig.pelvis.position.y = (p.crouch ? 0.68 : 0.9) + Math.abs(Math.sin(rig.walkPhase)) * 0.04 * moveFactor;

@@ -45,6 +45,7 @@ export interface RemotePlayerState {
   dodge: boolean;
   guard: boolean;
   lastUpdated: number;
+  receivedAt?: number;
 }
 
 export interface NetLocalPlayerState {
@@ -242,6 +243,7 @@ export class MultiplayerClient {
   private cloudPlayerDocCreated = false;
   private cloudJoinSeq = 0;
   private cloudWriteInFlight = false;
+  private cloudDirtyPending = false;
   private serverTimeOffsetMs = 0;
 
   private roomId: string;
@@ -252,6 +254,7 @@ export class MultiplayerClient {
   private callbacks: MultiplayerCallbacks;
   private lastSentAt = 0;
   private lastSentSignature = '';
+  private lastSentSpeed = 0;
   private lastUiEmitAt = 0;
   private lastChatTs = 0;
 
@@ -513,6 +516,18 @@ export class MultiplayerClient {
       (snapshot) => {
         if (this.disposed || seq !== this.cloudJoinSeq) return;
         const localNow = Date.now();
+        const perfNow = performance.now();
+        const changedRemoteIds = new Set<string>();
+        let anyRemoteChanged = false;
+
+        for (const change of snapshot.docChanges()) {
+          if (change.doc.id === this.cloudSessionId) continue;
+          anyRemoteChanged = true;
+          if (change.type === 'added' || change.type === 'modified') {
+            changedRemoteIds.add(change.doc.id);
+          }
+        }
+
         snapshot.forEach((docSnap) => {
           if (docSnap.id === this.cloudSessionId) {
             const selfData = docSnap.data() as Record<string, unknown>;
@@ -522,8 +537,15 @@ export class MultiplayerClient {
             }
           }
         });
+
+        // Skip rebuilding remote players if only our own local write echoed back
+        if (!anyRemoteChanged && this.players.size > 0) {
+          return;
+        }
+
         const now = localNow + this.serverTimeOffsetMs;
-        const prevIds = new Set(this.players.keys());
+        const prevMap = new Map(this.players);
+        const prevIds = new Set(prevMap.keys());
         const nextIds = new Set<string>();
         let structureChanged = false;
 
@@ -536,8 +558,12 @@ export class MultiplayerClient {
             tsObj && typeof tsObj.toMillis === 'function' ? tsObj.toMillis() : now;
           if (now - updatedMs > 60000) return;
 
+          const id = typeof d.id === 'string' ? d.id : docSnap.id;
+          const prevPlayer = prevMap.get(id);
+          const packetChanged = changedRemoteIds.has(docSnap.id) || !prevPlayer;
+
           const rp: RemotePlayerState = {
-            id: typeof d.id === 'string' ? d.id : docSnap.id,
+            id,
             roomId: activeRoom,
             name: typeof d.name === 'string' ? d.name : 'Sayohatchi',
             colorIdx: typeof d.colorIdx === 'number' ? d.colorIdx : 0,
@@ -557,10 +583,12 @@ export class MultiplayerClient {
             dodge: Boolean(d.dodge),
             guard: Boolean(d.guard),
             lastUpdated: updatedMs,
+            receivedAt: packetChanged ? perfNow : prevPlayer?.receivedAt ?? perfNow,
           };
 
-          const prev = prevIds.has(rp.id);
-          if (!prev) structureChanged = true;
+          if (!prevPlayer || prevPlayer.mapId !== rp.mapId || prevPlayer.name !== rp.name) {
+            structureChanged = true;
+          }
           nextIds.add(rp.id);
           this.players.set(rp.id, rp);
         });
@@ -620,7 +648,7 @@ export class MultiplayerClient {
     // 5. Periodic heartbeat + local stale player pruner
     this.cloudHeartbeatTimer = window.setInterval(() => {
       void this.flushCloudState(true);
-    }, 5000);
+    }, 6000);
 
     this.cloudPruneTimer = window.setInterval(() => {
       const now = Date.now() + this.serverTimeOffsetMs;
@@ -642,30 +670,41 @@ export class MultiplayerClient {
       this.disposed ||
       this.mode !== 'cloud' ||
       !this.currentUser ||
-      !this.cloudPlayerDocCreated ||
-      this.cloudWriteInFlight
+      !this.cloudPlayerDocCreated
     ) {
       return;
     }
 
     const s = this.latestLocalState;
     const now = performance.now();
-    const signature = `${s.mapId}:${Math.round(s.x * 8)}:${Math.round(s.y * 8)}:${Math.round(s.z * 8)}:${Math.round(s.yaw * 16)}:${s.crouch ? 1 : 0}:${s.sprint ? 1 : 0}:${s.swim ? 1 : 0}:${s.flashlight ? 1 : 0}:${s.attackTimer > 0 ? 1 : 0}:${s.dodge ? 1 : 0}:${s.guard ? 1 : 0}`;
+    const signature = `${s.mapId}:${Math.round(s.x * 8)}:${Math.round(s.y * 8)}:${Math.round(s.z * 8)}:${Math.round(s.yaw * 16)}:${Math.round(s.speed * 2)}:${s.crouch ? 1 : 0}:${s.sprint ? 1 : 0}:${s.swim ? 1 : 0}:${s.flashlight ? 1 : 0}:${s.attackTimer > 0 ? 1 : 0}:${s.dodge ? 1 : 0}:${s.guard ? 1 : 0}`;
+    const stoppedNow = s.speed < 0.15 && this.lastSentSpeed >= 0.35 && now - this.lastSentAt >= 50;
     const urgent =
       s.attackTimer > 0 ||
       s.dodge ||
+      stoppedNow ||
       signature.split(':')[0] !== this.lastSentSignature.split(':')[0];
 
-    if (!force && signature === this.lastSentSignature && now - this.lastSentAt < 4500) {
+    if (!force && signature === this.lastSentSignature && now - this.lastSentAt < 5500) {
       return;
     }
-    if (!force && !urgent && now - this.lastSentAt < 180) {
+
+    if (this.cloudWriteInFlight) {
+      if (force || signature !== this.lastSentSignature) {
+        this.cloudDirtyPending = true;
+      }
+      return;
+    }
+
+    if (!force && !urgent && now - this.lastSentAt < 110) {
       return;
     }
 
     this.lastSentAt = now;
     this.lastSentSignature = signature;
+    this.lastSentSpeed = s.speed;
     this.cloudWriteInFlight = true;
+    this.cloudDirtyPending = false;
 
     const playerPath = `rooms/${this.roomId}/players/${this.cloudSessionId}`;
     const playerRef = doc(db, 'rooms', this.roomId, 'players', this.cloudSessionId);
@@ -685,6 +724,10 @@ export class MultiplayerClient {
       }
     } finally {
       this.cloudWriteInFlight = false;
+      if (this.cloudDirtyPending && !this.disposed && this.mode === 'cloud') {
+        this.cloudDirtyPending = false;
+        void this.flushCloudState(false);
+      }
     }
   }
 
@@ -1015,7 +1058,7 @@ export class MultiplayerClient {
     const list = Array.from(this.players.values());
     this.callbacks.onPlayersFrame?.(list);
     const now = performance.now();
-    if (forceUi || now - this.lastUiEmitAt >= 240) {
+    if (forceUi || now - this.lastUiEmitAt >= 900) {
       this.lastUiEmitAt = now;
       this.callbacks.onPlayersChange(list);
     }

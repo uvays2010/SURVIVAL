@@ -17,6 +17,7 @@ import {
   getPresetGraphicsFlags,
   WorldMapId,
   getWorldMapDef,
+  EnemyMapMarker,
 } from './types';
 import {
   groundHeightAt,
@@ -33,6 +34,7 @@ import { createCharacterSystem } from './character';
 import { createWildlifeSystem } from './wildlife';
 import { createWeatherAndVfxSystem } from './weatherAndVfx';
 import { createCombatSystem, CombatSystem } from './combat';
+import { createEnemySystem, EnemySystem } from './enemies';
 import { NetLocalPlayerState, RemotePlayerState } from './multiplayer';
 import { RemotePlayersSystem } from './remotePlayers';
 
@@ -186,6 +188,7 @@ export class SurvivalEngine {
   private wildlife!: ReturnType<typeof createWildlifeSystem>;
   private weatherVfx!: ReturnType<typeof createWeatherAndVfxSystem>;
   private combat!: CombatSystem;
+  private enemies!: EnemySystem;
   private remotePlayersSystem!: RemotePlayersSystem;
   private remotePlayers: RemotePlayerState[] = [];
 
@@ -223,6 +226,10 @@ export class SurvivalEngine {
   private attackPendingHeavy = false;
 
   // Survival vitals
+  private health = 100;
+  private maxHealth = 100;
+  private playerHitFlash = 0;
+  private respawnBannerTimer = 0;
   private stamina = 100;
   private warmth = 90;
   private hydration = 92;
@@ -452,6 +459,7 @@ export class SurvivalEngine {
       this.world.crateAnchors,
       this.world.totemAnchors
     );
+    this.enemies = createEnemySystem(this.scene, this.activeMapId);
     this.remotePlayersSystem = new RemotePlayersSystem(this.scene, textures);
 
     // Volumetric Sunset / Golden-Hour God-Ray Shaft Planes across the Valley
@@ -856,6 +864,7 @@ export class SurvivalEngine {
       const { dist } = waterDistanceInfo(this.character.state.position.x, this.character.state.position.z);
       if (dist < 3.5) {
         this.hydration = Math.min(100, this.hydration + 25);
+        this.health = Math.min(this.maxHealth, this.health + 8);
       }
     }
   }
@@ -1060,6 +1069,7 @@ export class SurvivalEngine {
         this.wildlife.dispose();
         this.scene.remove(this.combat.root);
         this.combat.dispose();
+        this.enemies?.dispose();
         this.hasActiveWorldEntities = false;
       }
 
@@ -1082,6 +1092,9 @@ export class SurvivalEngine {
         this.world.crateAnchors,
         this.world.totemAnchors
       );
+      this.enemies = createEnemySystem(this.scene, mapDef.id);
+      this.health = 100;
+      this.playerHitFlash = 0;
       this.hasActiveWorldEntities = true;
 
       this.weatherVfx.setCampfirePos(this.world.campfirePos);
@@ -1144,6 +1157,11 @@ export class SurvivalEngine {
     this.remotePlayers = players;
   }
 
+  public getEnemyMarkers(): EnemyMapMarker[] {
+    if (!this.worldReady || !this.enemies) return [];
+    return this.enemies.getMapMarkers();
+  }
+
   public getLocalNetState(): NetLocalPlayerState {
     if (!this.worldReady || !this.character) {
       const def = getWorldMapDef(this.activeMapId);
@@ -1166,12 +1184,13 @@ export class SurvivalEngine {
       };
     }
     const s = this.character.state;
+    const bodyYaw = this.character.group.rotation.y - Math.PI;
     return {
       mapId: this.activeMapId,
       x: s.position.x,
       y: s.position.y,
       z: s.position.z,
-      yaw: s.yaw,
+      yaw: bodyYaw,
       speed: s.moveSpeed,
       crouch: s.isCrouching,
       sprint: s.isSprinting,
@@ -1562,12 +1581,56 @@ export class SurvivalEngine {
           this._attackDir,
           this.attackPendingHeavy ? 3.2 : 2.5,
           this.attackPendingHeavy,
-          this.wildlife.checkMeleeHit
+          this.wildlife.checkMeleeHit,
+          this.enemies.checkMeleeHit
         );
         if (res.hit) {
           this.hitStopTimer = res.hitStop;
           this.cameraTrauma = Math.min(1, this.cameraTrauma + res.shake);
+          if (res.killedEnemy) {
+            this.health = Math.min(100, this.health + 18);
+            this.stamina = Math.min(100, this.stamina + 25);
+          }
         }
+      }
+    }
+
+    // Update Hostile Enemies (Maxluqlar, Yovuz dushmanlar, Bosslar, Guruhlar, Mexaniklar)
+    this.playerHitFlash = Math.max(0, this.playerHitFlash - dt * 2.8);
+    this.respawnBannerTimer = Math.max(0, this.respawnBannerTimer - dt);
+    const enemyRes = this.enemies.update(
+      simDt,
+      this.elapsed,
+      this.character.state.position,
+      this.character.state.dodgeTimer > 0,
+      this.character.state.isGuarding,
+      this.entered
+    );
+    if (enemyRes.bossShockwavePos) {
+      this.combat.spawnImpactPulse(enemyRes.bossShockwavePos, 0xa855f7, 6.2, 16);
+      this.cameraTrauma = Math.min(1, this.cameraTrauma + 0.35);
+    }
+    if (enemyRes.mechShockwavePos) {
+      this.combat.spawnImpactPulse(enemyRes.mechShockwavePos, 0x38bdf8, 4.4, 12);
+      this.cameraTrauma = Math.min(1, this.cameraTrauma + 0.22);
+    }
+    if (enemyRes.playerDamage > 0) {
+      if (enemyRes.playerHitBlocked) {
+        this.combat.playCombatSfx('guard');
+        this.combat.spawnImpactPulse(this.character.state.position, 0xfbbf24, 2.2, 8);
+      } else {
+        this.combat.playCombatSfx('hit');
+        this.playerHitFlash = 1.0;
+      }
+      this.cameraTrauma = Math.min(1, this.cameraTrauma + (enemyRes.playerHitBlocked ? 0.16 : 0.42));
+      this.health = Math.max(0, this.health - enemyRes.playerDamage);
+      if (this.health <= 0) {
+        const mapDef = getWorldMapDef(this.activeMapId);
+        this.character.setPosition(mapDef.spawn.x, mapDef.spawn.z, mapDef.spawn.yaw);
+        this.health = this.maxHealth;
+        this.stamina = 100;
+        this.playerHitFlash = 1.0;
+        this.respawnBannerTimer = 3.0;
       }
     }
 
@@ -1581,6 +1644,9 @@ export class SurvivalEngine {
     }
 
     const nearCamp = this.character.state.position.distanceTo(this.world.campfirePos) < 6.5;
+    if (nearCamp && this.weatherVfx.campfireLit) {
+      this.health = Math.min(100, this.health + simDt * 5.5);
+    }
     const targetWarmth =
       nearCamp && this.weatherVfx.campfireLit
         ? 98
@@ -1678,6 +1744,8 @@ export class SurvivalEngine {
         playerX: Math.round(p.x * 10) / 10,
         playerZ: Math.round(p.z * 10) / 10,
         speedMs: Math.round(this.character.state.moveSpeed * 10) / 10,
+        health: Math.round(this.health),
+        maxHealth: this.maxHealth,
         stamina: Math.round(this.stamina),
         warmth: Math.round(this.warmth),
         hydration: Math.round(this.hydration),
@@ -1689,6 +1757,10 @@ export class SurvivalEngine {
         flashlightOn: this.character.state.flashlightOn,
         fps: this.currentFps,
         isPointerLocked: this.isPointerLocked,
+        defeatedCount: this.enemies.getDefeatedCount(),
+        activeEnemyTarget: this.entered ? this.enemies.getHudTarget(this.character.state.position) : null,
+        playerHitFlash: Number(this.playerHitFlash.toFixed(2)),
+        respawnBannerTimer: Number(this.respawnBannerTimer.toFixed(1)),
       });
     }
 
@@ -1743,6 +1815,7 @@ export class SurvivalEngine {
       this.world?.dispose();
       this.wildlife?.dispose();
       this.combat?.dispose();
+      this.enemies?.dispose();
       this.hasActiveWorldEntities = false;
     }
     this.remotePlayersSystem?.dispose();

@@ -13,11 +13,14 @@ export interface TotemAnchor {
   z: number;
 }
 
+import type { EnemyMeleeHitInfo } from './enemies';
+
 export interface CombatHitResult {
   hit: boolean;
   hitStop: number;
   shake: number;
-  targetKind: 'none' | 'crate' | 'totem' | 'wildlife';
+  targetKind: 'none' | 'crate' | 'totem' | 'wildlife' | 'enemy';
+  killedEnemy?: boolean;
 }
 
 interface SlashArcInstance {
@@ -109,12 +112,14 @@ export interface CombatSystem {
     isHeavy: boolean
   ) => void;
   spawnDodgeBurst: (origin: THREE.Vector3) => void;
+  spawnImpactPulse: (origin: THREE.Vector3, colorHex: number, maxScale: number, sparkCount?: number) => void;
   triggerAttackHitCheck: (
     origin: THREE.Vector3,
     forwardDir: THREE.Vector3,
     range: number,
     isHeavy: boolean,
-    wildlifeHitCheck: (origin: THREE.Vector3, dir: THREE.Vector3, range: number, isHeavy: boolean) => THREE.Vector3 | null
+    wildlifeHitCheck: (origin: THREE.Vector3, dir: THREE.Vector3, range: number, isHeavy: boolean) => THREE.Vector3 | null,
+    enemyHitCheck?: (origin: THREE.Vector3, dir: THREE.Vector3, range: number, isHeavy: boolean) => EnemyMeleeHitInfo | null
   ) => CombatHitResult;
   playCombatSfx: (kind: 'slash' | 'heavy' | 'hit' | 'break' | 'dodge' | 'guard') => void;
   update: (dt: number, elapsed: number) => void;
@@ -578,6 +583,16 @@ export function createCombatSystem(
     playCombatSfx('dodge');
   };
 
+  const spawnImpactPulse = (
+    origin: THREE.Vector3,
+    colorHex: number,
+    maxScale: number,
+    sparkCount = 14
+  ) => {
+    spawnShockwave(origin.x, origin.y, origin.z, maxScale, colorHex);
+    emitSparks(origin.x, origin.y + 0.85, origin.z, sparkCount, maxScale >= 3.5);
+  };
+
   const _toTarget = new THREE.Vector3();
 
   const triggerAttackHitCheck = (
@@ -585,10 +600,40 @@ export function createCombatSystem(
     forwardDir: THREE.Vector3,
     range: number,
     isHeavy: boolean,
-    wildlifeHitCheck: (origin: THREE.Vector3, dir: THREE.Vector3, range: number, isHeavy: boolean) => THREE.Vector3 | null
+    wildlifeHitCheck: (origin: THREE.Vector3, dir: THREE.Vector3, range: number, isHeavy: boolean) => THREE.Vector3 | null,
+    enemyHitCheck?: (origin: THREE.Vector3, dir: THREE.Vector3, range: number, isHeavy: boolean) => EnemyMeleeHitInfo | null
   ): CombatHitResult => {
     let hit = false;
     let targetKind: CombatHitResult['targetKind'] = 'none';
+    let killedEnemy = false;
+
+    // 0. Check Hostile Enemies & Bosses (highest combat priority)
+    const enemyHit = enemyHitCheck?.(origin, forwardDir, range, isHeavy) ?? null;
+    if (enemyHit) {
+      hit = true;
+      targetKind = 'enemy';
+      killedEnemy = enemyHit.killed;
+      const fxColor = enemyHit.isMech
+        ? 0x38bdf8
+        : enemyHit.category === 'boss'
+        ? 0xa855f7
+        : 0xff4522;
+      emitSparks(
+        enemyHit.hitPos.x,
+        enemyHit.hitPos.y + 1.05,
+        enemyHit.hitPos.z,
+        isHeavy || enemyHit.killed ? 26 : 16,
+        isHeavy || enemyHit.isMech
+      );
+      spawnShockwave(
+        enemyHit.hitPos.x,
+        enemyHit.hitPos.y + 0.08,
+        enemyHit.hitPos.z,
+        enemyHit.killed ? 4.4 : isHeavy ? 3.8 : 2.3,
+        fxColor
+      );
+      playCombatSfx(enemyHit.killed ? 'break' : 'hit');
+    }
 
     // 1. Check Crates
     for (const cr of crates) {
@@ -658,6 +703,7 @@ export function createCombatSystem(
       hitStop: hit ? (isHeavy ? 0.055 : 0.028) : 0,
       shake: hit ? (isHeavy ? 0.55 : 0.24) : isHeavy ? 0.28 : 0.08,
       targetKind,
+      killedEnemy,
     };
   };
 
@@ -825,6 +871,7 @@ export function createCombatSystem(
     root,
     spawnSlashArc,
     spawnDodgeBurst,
+    spawnImpactPulse,
     triggerAttackHitCheck,
     playCombatSfx,
     update,

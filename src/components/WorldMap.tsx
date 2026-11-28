@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Compass, Flame, Globe2, Layers, Map as MapIcon, Maximize2, Navigation, X } from 'lucide-react';
-import { getWorldMapDef, WORLD_MAPS, WorldMapId } from '../game/types';
+import { EnemyCategory, EnemyMapMarker, getWorldMapDef, WORLD_MAPS, WorldMapId } from '../game/types';
 import {
   getBiomeWeights,
   getCaveProximity,
@@ -12,6 +12,21 @@ import { GameLang, TRANSLATIONS } from '../i18n';
 import { PLAYER_PALETTE, RemotePlayerState } from '../game/multiplayer';
 
 export type MapStyleMode = 'TOPO' | 'SATELLITE' | 'RADAR' | 'ELEVATION';
+
+function getEnemyMarkerColor(category: EnemyCategory): string {
+  switch (category) {
+    case 'boss':
+      return '#c084fc';
+    case 'mech':
+      return '#38bdf8';
+    case 'squad':
+      return '#fb923c';
+    case 'beast':
+    case 'raider':
+    default:
+      return '#f43f5e';
+  }
+}
 
 interface WorldMapProps {
   visible: boolean;
@@ -25,7 +40,9 @@ interface WorldMapProps {
   biomeLabel: string;
   campfireLit: boolean;
   lang: GameLang;
+  compact?: boolean;
   remotePlayers?: RemotePlayerState[];
+  enemyMarkers?: EnemyMapMarker[];
   onTeleport: (landmarkId: string) => void;
   onSwitchMap: (mapId: WorldMapId) => void;
 }
@@ -271,7 +288,9 @@ export const WorldMap: React.FC<WorldMapProps> = ({
   biomeLabel,
   campfireLit,
   lang,
+  compact = false,
   remotePlayers = [],
+  enemyMarkers = [],
   onTeleport,
   onSwitchMap,
 }) => {
@@ -393,6 +412,38 @@ export const WorldMap: React.FC<WorldMapProps> = ({
     ctx.stroke();
     ctx.restore();
 
+    // Hostile enemies & World Boss markers on mini-map
+    for (const em of enemyMarkers) {
+      const dx = (em.x - playerX) * pxPerMeter;
+      const dz = (em.z - playerZ) * pxPerMeter;
+      const distPx = Math.hypot(dx, dz);
+      const maxR = half - 9;
+      if (distPx > maxR && em.category !== 'boss') continue;
+      const drawX = distPx <= maxR ? half + dx : half + (dx / distPx) * (half - 7);
+      const drawY = distPx <= maxR ? half + dz : half + (dz / distPx) * (half - 7);
+      const color = getEnemyMarkerColor(em.category);
+
+      if (em.category === 'boss') {
+        ctx.save();
+        ctx.translate(drawX, drawY);
+        ctx.rotate(Math.PI / 4);
+        ctx.fillStyle = color;
+        ctx.fillRect(-4.5, -4.5, 9, 9);
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1.3;
+        ctx.strokeRect(-4.5, -4.5, 9, 9);
+        ctx.restore();
+      } else {
+        ctx.beginPath();
+        ctx.arc(drawX, drawY, 3.1, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.strokeStyle = '#0b0e11';
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+      }
+    }
+
     // Remote teammates on the same map
     for (const rp of remotePlayers) {
       if (rp.mapId !== activeMapId) continue;
@@ -420,7 +471,7 @@ export const WorldMap: React.FC<WorldMapProps> = ({
         ctx.fill();
       }
     }
-  }, [visible, bakedTerrain, activeMapDef, activeMapId, playerX, playerZ, headingDeg, campfireLit, remotePlayers]);
+  }, [visible, bakedTerrain, activeMapDef, activeMapId, playerX, playerZ, headingDeg, campfireLit, remotePlayers, enemyMarkers]);
 
   // Draw Full World Atlas base terrain + player cone when Current Map tab is visible
   useEffect(() => {
@@ -467,6 +518,34 @@ export const WorldMap: React.FC<WorldMapProps> = ({
     ctx.stroke();
     ctx.restore();
 
+    // Draw hostile enemy markers on Full Atlas canvas
+    for (const em of enemyMarkers) {
+      const pos = worldToNorm(em.x, em.z);
+      const ex = pos.nx * size;
+      const ey = pos.ny * size;
+      const color = getEnemyMarkerColor(em.category);
+
+      if (em.category === 'boss') {
+        ctx.save();
+        ctx.translate(ex, ey);
+        ctx.rotate(Math.PI / 4);
+        ctx.fillStyle = color;
+        ctx.fillRect(-5.5, -5.5, 11, 11);
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1.6;
+        ctx.strokeRect(-5.5, -5.5, 11, 11);
+        ctx.restore();
+      } else {
+        ctx.beginPath();
+        ctx.arc(ex, ey, 3.8, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.strokeStyle = '#0b0e11';
+        ctx.lineWidth = 1.3;
+        ctx.stroke();
+      }
+    }
+
     // Draw remote teammates on Full Atlas canvas
     for (const rp of remotePlayers) {
       if (rp.mapId !== activeMapId) continue;
@@ -491,7 +570,7 @@ export const WorldMap: React.FC<WorldMapProps> = ({
       ctx.strokeText(rp.name, rx + 8, ry + 4);
       ctx.fillText(rp.name, rx + 8, ry + 4);
     }
-  }, [isOpen, atlasTab, bakedTerrain, activeMapId, playerX, playerZ, headingDeg, remotePlayers]);
+  }, [isOpen, atlasTab, bakedTerrain, activeMapId, playerX, playerZ, headingDeg, remotePlayers, enemyMarkers]);
 
   if (!visible) return null;
 
@@ -513,22 +592,40 @@ export const WorldMap: React.FC<WorldMapProps> = ({
         onTouchStart={(e) => e.stopPropagation()}
         aria-label={t.map.openMap}
         title={t.map.minimapLabel}
-        className="group absolute top-12 right-3 sm:top-14 sm:right-5 z-20 w-[86px] h-[86px] sm:w-[132px] sm:h-[132px] rounded-xl border border-white/22 bg-[#0b1016]/90 shadow-[0_8px_24px_rgba(0,0,0,0.55)] overflow-hidden cursor-pointer transition-transform active:scale-95 hover:border-amber-400/70 select-none"
+        className={`group absolute z-20 border border-white/20 bg-[#0b1016]/85 shadow-[0_6px_18px_rgba(0,0,0,0.5)] overflow-hidden cursor-pointer transition-transform active:scale-95 hover:border-amber-400/70 select-none ${
+          compact
+            ? 'top-9 right-2.5 w-[62px] h-[62px] rounded-lg'
+            : 'top-14 right-5 w-[132px] h-[132px] rounded-xl'
+        }`}
       >
         <canvas ref={miniCanvasRef} width={220} height={220} className="w-full h-full block" />
-        <div className="pointer-events-none absolute inset-0 rounded-xl ring-1 ring-inset ring-white/10" />
+        <div
+          className={`pointer-events-none absolute inset-0 ring-1 ring-inset ring-white/10 ${
+            compact ? 'rounded-lg' : 'rounded-xl'
+          }`}
+        />
 
-        <span className="pointer-events-none absolute top-1 left-1/2 -translate-x-1/2 px-1.5 py-[1px] rounded bg-[#0b1016]/85 text-[9px] sm:text-[10px] font-bold tracking-wider text-amber-300 border border-white/10">
+        <span
+          className={`pointer-events-none absolute top-0.5 left-1/2 -translate-x-1/2 rounded bg-[#0b1016]/85 font-bold tracking-wider text-amber-300 border border-white/10 ${
+            compact ? 'px-1 py-0 text-[8px]' : 'top-1 px-1.5 py-[1px] text-[10px]'
+          }`}
+        >
           {t.map.northShort}
         </span>
 
         <span className="pointer-events-none absolute bottom-1 left-1 right-1 flex items-center justify-between gap-1">
-          <span className="hidden sm:inline truncate max-w-[82px] px-1.5 py-[1px] rounded bg-[#0b1016]/85 text-[9px] font-medium text-stone-200 border border-white/10">
-            {currentMapMeta.name}
-          </span>
-          <span className="ml-auto flex items-center gap-1 px-1.5 py-[2px] rounded bg-[#0b1016]/85 text-[9px] sm:text-[10px] font-medium text-stone-200 border border-white/10 group-hover:text-amber-300">
-            <Maximize2 className="w-2.5 h-2.5" />
-            <span className="hidden sm:inline">M</span>
+          {!compact && (
+            <span className="truncate max-w-[82px] px-1.5 py-[1px] rounded bg-[#0b1016]/85 text-[9px] font-medium text-stone-200 border border-white/10">
+              {currentMapMeta.name}
+            </span>
+          )}
+          <span
+            className={`ml-auto flex items-center gap-1 rounded bg-[#0b1016]/85 font-medium text-stone-200 border border-white/10 group-hover:text-amber-300 ${
+              compact ? 'px-1 py-[1px] text-[8px]' : 'px-1.5 py-[2px] text-[10px]'
+            }`}
+          >
+            <Maximize2 className={compact ? 'w-2 h-2' : 'w-2.5 h-2.5'} />
+            {!compact && <span>M</span>}
           </span>
         </span>
       </button>

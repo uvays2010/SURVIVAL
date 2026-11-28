@@ -45,9 +45,9 @@ export const MapTransitionOverlay: React.FC<MapTransitionOverlayProps> = ({
       aria-live="polite"
       aria-label={mapInfo.name}
     >
-      <div className="w-full max-w-xl border border-white/12 bg-[#0f141b] rounded-xl shadow-2xl p-4 sm:p-6 flex flex-col gap-4">
-        <div className="flex items-center gap-4">
-          <div className="w-24 h-24 sm:w-28 sm:h-28 rounded-lg overflow-hidden border border-white/15 bg-[#0a0e13] shrink-0">
+      <div className="w-full max-w-md border border-white/12 bg-[#0f141b] rounded-xl shadow-2xl p-3.5 sm:p-5 flex flex-col gap-3">
+        <div className="flex items-center gap-3">
+          <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-lg overflow-hidden border border-white/15 bg-[#0a0e13] shrink-0">
             <canvas
               ref={thumbCanvasRef}
               width={180}
@@ -57,27 +57,27 @@ export const MapTransitionOverlay: React.FC<MapTransitionOverlayProps> = ({
           </div>
 
           <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-1.5 text-xs text-amber-400 font-medium">
-              <Compass className="w-3.5 h-3.5 shrink-0" />
+            <div className="flex items-center gap-1.5 text-[10px] sm:text-[11px] text-amber-400 font-medium">
+              <Compass className="w-3 h-3 shrink-0" />
               <span>{t.map.loadingMapLabel}</span>
             </div>
-            <h2 className="mt-1 font-display text-xl sm:text-2xl font-bold tracking-wide text-white truncate">
+            <h2 className="mt-0.5 font-display text-base sm:text-lg font-bold tracking-wide text-white truncate">
               {mapInfo.name}
             </h2>
-            <p className="mt-1 text-xs sm:text-sm text-stone-400 leading-relaxed">
+            <p className="mt-0.5 text-[11px] sm:text-xs text-stone-400 leading-snug">
               {mapInfo.desc}
             </p>
           </div>
         </div>
 
-        <div className="flex flex-col gap-1.5 pt-2 border-t border-white/10">
-          <div className="flex items-center justify-between gap-4 text-xs sm:text-sm">
+        <div className="flex flex-col gap-1 pt-2 border-t border-white/10">
+          <div className="flex items-center justify-between gap-3 text-[11px] sm:text-xs">
             <span className="text-stone-200 font-medium truncate">{translatedStage}</span>
             <span className="font-mono-num text-amber-400 font-semibold shrink-0">
               {progress.percent}%
             </span>
           </div>
-          <div className="h-2 w-full overflow-hidden rounded-full bg-white/12">
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/12">
             <div
               className="h-full rounded-full bg-gradient-to-r from-amber-500 to-amber-300 transition-[width] duration-200 ease-out"
               style={{ width: `${Math.min(100, Math.max(6, progress.percent))}%` }}
